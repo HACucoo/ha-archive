@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import shutil
+import time
 from pathlib import Path
 
 from . import db, google
@@ -26,7 +27,14 @@ def install_provisioning(target: str | None) -> None:
 
 async def run(cfg: Config, once: bool, resync: bool) -> None:
     ready = False
+    last = 0.0
     while True:
+        # Wall clock, not asyncio's monotonic clock: that one stands still while the host is suspended,
+        # and right after waking up is when there is most to fetch
+        if time.time() - last < cfg.interval_s:
+            await asyncio.sleep(60)
+            continue
+        last = time.time()
         try:
             with db.connect(cfg.pg_dsn) as conn:
                 if not ready:
@@ -37,11 +45,11 @@ async def run(cfg: Config, once: bool, resync: bool) -> None:
                     await sync_once(ha, conn, cfg, resync=resync)
             resync = False
         except Exception:
-            # HA restarting or the database not up yet: try again next round
+            # HA restarting or the database not up yet: try again in five minutes
             log.exception("sync failed")
+            last = time.time() - cfg.interval_s + 300
         if once:
             return
-        await asyncio.sleep(cfg.interval_s)
 
 
 async def import_google(cfg: Config, path: str, entity_id: str) -> None:
