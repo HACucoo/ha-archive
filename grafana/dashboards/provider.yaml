@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: HA-Archiv
+    folder: HA-Archiv
+    type: file
+    # Own dashboards are saved in Grafana and survive; this one is overwritten on every start
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/provisioning/dashboards/json

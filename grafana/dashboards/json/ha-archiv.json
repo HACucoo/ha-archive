@@ -1,0 +1,74 @@
+{
+  "uid": "ha-archiv-start",
+  "title": "HA-Archiv",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "time": { "from": "now-30d", "to": "now" },
+  "refresh": "",
+  "tags": ["home-assistant"],
+  "templating": {
+    "list": [
+      {
+        "name": "sensor",
+        "label": "Messwerte",
+        "type": "query",
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "ha-archiv" },
+        "query": "SELECT statistic_id FROM meta WHERE has_mean ORDER BY 1",
+        "multi": true,
+        "includeAll": false,
+        "refresh": 1,
+        "current": { "text": ["sensor.luftdruck"], "value": ["sensor.luftdruck"] }
+      },
+      {
+        "name": "zaehler",
+        "label": "Zähler",
+        "type": "query",
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "ha-archiv" },
+        "query": "SELECT statistic_id FROM meta WHERE has_sum ORDER BY 1",
+        "multi": true,
+        "includeAll": false,
+        "refresh": 1,
+        "current": { "text": ["sensor.stromzahler_ht"], "value": ["sensor.stromzahler_ht"] }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Messwerte (bis 7 Tage 5-Minuten-Werte, darüber Stundenmittel)",
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "ha-archiv" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT $__timeGroupAlias(\"time\", $__interval), statistic_id AS metric, avg(mean) AS value\nFROM (\n  SELECT statistic_id, \"time\", mean FROM fuenf_minuten\n  WHERE $__timeFilter(\"time\") AND $__timeTo()::timestamptz - $__timeFrom()::timestamptz <= interval '7 days'\n  UNION ALL\n  SELECT statistic_id, \"time\", mean FROM stunde\n  WHERE $__timeFilter(\"time\") AND $__timeTo()::timestamptz - $__timeFrom()::timestamptz > interval '7 days'\n) x\nWHERE statistic_id IN ($sensor)\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "spanNulls": 3600000 } }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "barchart",
+      "title": "Verbrauch pro Tag",
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 11 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "ha-archiv" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT tag AS \"time\", statistic_id AS metric, verbrauch AS value FROM (\n  SELECT date_trunc('day', \"time\", 'Europe/Berlin') AS tag, statistic_id,\n    max(sum) - lag(max(sum)) OVER (PARTITION BY statistic_id ORDER BY date_trunc('day', \"time\", 'Europe/Berlin')) AS verbrauch\n  FROM stunde\n  WHERE statistic_id IN ($zaehler)\n    AND \"time\" >= $__timeFrom()::timestamptz - interval '1 day' AND \"time\" < $__timeTo()::timestamptz\n  GROUP BY 1, 2\n) d\nWHERE $__timeFilter(tag) AND verbrauch IS NOT NULL\nORDER BY 1"
+        }
+      ],
+      "transformations": [
+        { "id": "prepareTimeSeries", "options": { "format": "wide" } }
+      ],
+      "options": { "xTickLabelRotation": -45, "stacking": "none" }
+    }
+  ]
+}

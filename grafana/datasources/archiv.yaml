@@ -1,0 +1,16 @@
+# Written by the importer at start; Grafana fills the password from its environment
+apiVersion: 1
+datasources:
+  - name: HA-Archiv
+    uid: ha-archiv
+    type: grafana-postgresql-datasource
+    url: db:5432
+    user: grafana_ro
+    isDefault: true
+    jsonData:
+      database: archiv
+      sslmode: disable
+      postgresVersion: 1700
+      timescaledb: true
+    secureJsonData:
+      password: $GRAFANA_DB_PASSWORD

@@ -1,0 +1,55 @@
+services:
+  db:
+    image: timescale/timescaledb:latest-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: archiv
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: archiv
+    volumes:
+      - /mnt/docker-data/ha-archiv/db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U archiv -d archiv"]
+      interval: 10s
+      retries: 10
+
+  importer:
+    image: ghcr.io/hacucoo/ha-archiv:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      TZ: Europe/Berlin
+      HA_URL: http://192.168.2.139:8123
+      HA_TOKEN: ${HA_TOKEN}
+      PG_DSN: postgresql://archiv:${DB_PASSWORD}@db:5432/archiv
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+      # First run fetches HA's hourly statistics back to this date
+      HOURLY_SINCE: "2023-01-01"
+      PROVISIONING_DIR: /provisioning
+    volumes:
+      - provisioning:/provisioning
+
+  grafana:
+    image: grafana/grafana-oss:11.6.0
+    restart: unless-stopped
+    user: "1000:1000"
+    depends_on:
+      importer:
+        condition: service_healthy
+    environment:
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      # Read-only view without login (LAN only); editing needs the admin login
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/json/ha-archiv.json
+    ports:
+      - 3030:3000
+    volumes:
+      - provisioning:/etc/grafana/provisioning:ro
+      - /mnt/docker-data/ha-archiv/grafana:/var/lib/grafana
+
+volumes:
+  provisioning:
