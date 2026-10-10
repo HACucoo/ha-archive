@@ -75,3 +75,17 @@ class HAClient:
             types=TYPES,
             units={},
         ) or {}
+
+    async def history(self, entity_ids: list[str], start: datetime, end: datetime) -> dict:
+        """Every state row with attributes, in HA's compressed format (s, a, lu, lc)."""
+        return await self.call(
+            "history/history_during_period",
+            entity_ids=entity_ids,
+            start_time=iso(start),
+            end_time=iso(end),
+            minimal_response=False,
+            no_attributes=False,
+            significant_changes_only=False,
+            # Otherwise HA adds a made-up row at start_time with the state of that moment
+            include_start_time_state=False,
+        ) or {}

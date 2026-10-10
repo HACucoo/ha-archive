@@ -18,6 +18,7 @@ class FakeHA:
         self.requests = []
         self.statistic_ids = []
         self.rows = {}  # (statistic_id, period) -> list of rows with start in ms
+        self.history = {}  # entity_id -> list of compressed state rows (s, a, lu)
 
     async def handler(self, ws):
         await ws.send(json.dumps({"type": "auth_required", "ha_version": "2026.9.1"}))
@@ -46,6 +47,17 @@ class FakeHA:
                 rows = [r for r in self.rows.get((sid, msg["period"]), []) if start <= r["start"] < end]
                 if rows:
                     result[sid] = rows
+            return {"id": msg["id"], "type": "result", "success": True, "result": result}
+        if msg["type"] == "history/history_during_period":
+            from datetime import datetime
+
+            start = datetime.fromisoformat(msg["start_time"]).timestamp()
+            end = datetime.fromisoformat(msg["end_time"]).timestamp()
+            result = {}
+            for eid in msg["entity_ids"]:
+                rows = [r for r in self.history.get(eid, []) if start <= r["lu"] < end]
+                if rows:
+                    result[eid] = rows
             return {"id": msg["id"], "type": "result", "success": True, "result": result}
         return {"id": msg["id"], "type": "result", "success": False,
                 "error": {"code": "unknown_command", "message": "Unknown command."}}

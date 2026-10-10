@@ -1,0 +1,104 @@
+{
+  "uid": "ha-archiv-standorte",
+  "title": "Standorte",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "time": { "from": "now/d", "to": "now" },
+  "refresh": "",
+  "tags": ["home-assistant"],
+  "templating": {
+    "list": [
+      {
+        "name": "person",
+        "label": "Person",
+        "type": "query",
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "ha-archiv" },
+        "query": "SELECT DISTINCT name FROM positions WHERE name IS NOT NULL ORDER BY 1",
+        "multi": false,
+        "includeAll": false,
+        "refresh": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "geomap",
+      "title": "Weg",
+      "gridPos": { "h": 16, "w": 16, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "ha-archiv" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT \"time\", latitude, longitude, CASE state WHEN 'home' THEN 'Zuhause' WHEN 'not_home' THEN 'unterwegs' ELSE state END AS ort, accuracy\nFROM positions\nWHERE name = '$person' AND $__timeFilter(\"time\") AND latitude IS NOT NULL\n  AND (accuracy IS NULL OR accuracy <= 100)\nORDER BY \"time\""
+        }
+      ],
+      "options": {
+        "view": { "id": "fit", "allLayers": true, "lat": 48.99, "lon": 12.08, "zoom": 13, "padding": 10 },
+        "controls": { "showZoom": true, "mouseWheelZoom": true, "showAttribution": true },
+        "basemap": { "type": "default", "name": "Karte" },
+        "layers": [
+          {
+            "type": "route",
+            "name": "Weg",
+            "location": { "mode": "coords", "latitude": "latitude", "longitude": "longitude" },
+            "config": {
+              "style": {
+                "color": { "fixed": "blue" },
+                "opacity": 0.8,
+                "lineWidth": 3,
+                "size": { "fixed": 4 }
+              },
+              "arrow": 0
+            },
+            "tooltip": true
+          }
+        ],
+        "tooltip": { "mode": "details" }
+      }
+    },
+    {
+      "id": 2,
+      "type": "barchart",
+      "title": "Stunden pro Ort",
+      "gridPos": { "h": 16, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "ha-archiv" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT ort, round((sum(extract(epoch FROM least(coalesce(ende, now()), $__timeTo()::timestamptz) - greatest(beginn, $__timeFrom()::timestamptz))) / 3600)::numeric, 1) AS stunden\nFROM aufenthalte\nWHERE name = '$person' AND beginn < $__timeTo()::timestamptz AND coalesce(ende, now()) > $__timeFrom()::timestamptz\nGROUP BY ort\nORDER BY 2 DESC"
+        }
+      ],
+      "options": { "orientation": "horizontal", "showValue": "always", "xField": "ort" },
+      "fieldConfig": { "defaults": { "unit": "h", "decimals": 1 }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Aufenthalte",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "ha-archiv" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT beginn AS \"Von\", ende AS \"Bis\", ort AS \"Ort\", extract(epoch FROM coalesce(ende, now()) - beginn) AS \"Dauer\"\nFROM aufenthalte\nWHERE name = '$person' AND beginn < $__timeTo()::timestamptz AND coalesce(ende, now()) > $__timeFrom()::timestamptz\nORDER BY beginn DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Dauer" }, "properties": [{ "id": "unit", "value": "dtdurations" }] }
+        ]
+      }
+    }
+  ]
+}

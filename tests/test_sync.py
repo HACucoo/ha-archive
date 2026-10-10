@@ -91,3 +91,42 @@ async def test_sync_catches_up(pg, fake_ha):
     async with HAClient(fake_ha.url, "good") as ha:
         await sync_once(ha, pg, cfg(), now=later, resync=True)
     assert min(r["start_time"] for r in fake_ha.requests if r.get("period") == "hour").startswith("2026-09-01")
+
+
+def track(start, steps):
+    """steps: (minutes after start, state, lat, lon)"""
+    return [{"s": st, "lu": (start + timedelta(minutes=m)).timestamp(),
+             "a": {"friendly_name": "Stephan", "latitude": lat, "longitude": lon, "gps_accuracy": 12,
+                   "source": "device_tracker.nothing_phone_3"}}
+            for m, st, lat, lon in steps]
+
+
+async def test_positions_and_stays(pg, fake_ha):
+    db.setup(pg)
+    morning = NOW - timedelta(hours=12)
+    fake_ha.history["person.stephan"] = track(morning, [
+        (0, "home", 48.99, 12.07), (30, "home", 48.99, 12.07),
+        (40, "not_home", 49.00, 12.07), (45, "not_home", 49.01, 12.07),
+        (50, "Arbeit", 49.012, 12.074), (400, "Arbeit", 49.012, 12.074),
+        (500, "home", 48.99, 12.07),
+    ])
+    # Older than HA keeps anyway: never asked for
+    fake_ha.history["person.stephan"].insert(0, track(NOW - timedelta(days=20), [(0, "home", 1, 1)])[0])
+    async with HAClient(fake_ha.url, "good") as ha:
+        await sync_once(ha, pg, cfg(location_entities=("person.stephan",)), now=NOW)
+
+    assert pg.execute("SELECT count(*), max(name), max(source) FROM positions").fetchone() == (
+        7, "Stephan", "device_tracker.nothing_phone_3")
+    history_requests = [r for r in fake_ha.requests if r["type"] == "history/history_during_period"]
+    assert all(r["include_start_time_state"] is False for r in history_requests)
+    assert min(r["start_time"] for r in history_requests) >= (NOW - timedelta(days=10)).isoformat()
+
+    stays = pg.execute(
+        "SELECT ort, extract(epoch FROM ende - beginn) / 60 FROM aufenthalte ORDER BY beginn"
+    ).fetchall()
+    assert stays == [("Zuhause", 40), ("unterwegs", 10), ("Arbeit", 450), ("Zuhause", None)]
+
+    # Second run: nothing new, nothing duplicated
+    async with HAClient(fake_ha.url, "good") as ha:
+        await sync_once(ha, pg, cfg(location_entities=("person.stephan",)), now=NOW + timedelta(hours=1))
+    assert pg.execute("SELECT count(*) FROM positions").fetchone()[0] == 7

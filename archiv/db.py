@@ -9,9 +9,10 @@ from psycopg import sql
 log = logging.getLogger(__name__)
 
 TABLES = {
-    # table: (chunk interval, compress chunks older than)
-    "stats_hour": ("90 days", "90 days"),
-    "stats_5min": ("7 days", "14 days"),
+    # table: (time column, compression segment column, chunk interval, compress chunks older than)
+    "stats_hour": ("start", "meta_id", "90 days", "90 days"),
+    "stats_5min": ("start", "meta_id", "7 days", "14 days"),
+    "positions": ("time", "entity_id", "30 days", "30 days"),
 }
 
 SCHEMA = """
@@ -45,6 +46,31 @@ CREATE OR REPLACE VIEW stunde AS
 CREATE OR REPLACE VIEW fuenf_minuten AS
     SELECT m.statistic_id, m.name, m.unit, s.start AS "time", s.mean, s.min, s.max, s.state, s.sum
     FROM stats_5min s JOIN meta m ON m.id = s.meta_id;
+CREATE TABLE IF NOT EXISTS positions (
+    entity_id text NOT NULL,
+    "time"    timestamptz NOT NULL,
+    name      text,
+    state     text,
+    latitude  double precision,
+    longitude double precision,
+    accuracy  double precision,
+    source    text,
+    PRIMARY KEY (entity_id, "time")
+);
+-- One row per stay: consecutive updates in the same zone (or on the road) form one stay
+CREATE OR REPLACE VIEW aufenthalte AS
+    WITH changes AS (
+        SELECT entity_id, name, "time", state,
+            CASE WHEN state IS DISTINCT FROM lag(state) OVER w THEN 1 ELSE 0 END AS neu
+        FROM positions WINDOW w AS (PARTITION BY entity_id ORDER BY "time")
+    ), stays AS (
+        SELECT *, sum(neu) OVER (PARTITION BY entity_id ORDER BY "time") AS nr FROM changes
+    )
+    SELECT entity_id, max(name) AS name,
+        CASE state WHEN 'home' THEN 'Zuhause' WHEN 'not_home' THEN 'unterwegs' ELSE state END AS ort,
+        min("time") AS beginn,
+        lead(min("time")) OVER (PARTITION BY entity_id ORDER BY min("time")) AS ende
+    FROM stays GROUP BY entity_id, state, nr;
 """
 
 
@@ -58,11 +84,11 @@ def setup(conn: psycopg.Connection, ro_password: str | None = None) -> bool:
     conn.execute(SCHEMA)
     conn.commit()
     if timescale:
-        for table, (chunk, compress_after) in TABLES.items():
+        for table, (time_col, segment_col, chunk, compress_after) in TABLES.items():
             conn.execute(
-                "SELECT create_hypertable(%s, by_range('start', %s::interval),"
+                "SELECT create_hypertable(%s, by_range(%s, %s::interval),"
                 " if_not_exists => TRUE, migrate_data => TRUE)",
-                (table, chunk),
+                (table, time_col, chunk),
             )
             enabled = conn.execute(
                 "SELECT compression_enabled FROM timescaledb_information.hypertables"
@@ -72,8 +98,8 @@ def setup(conn: psycopg.Connection, ro_password: str | None = None) -> bool:
             if enabled and not enabled[0]:
                 conn.execute(sql.SQL(
                     "ALTER TABLE {} SET (timescaledb.compress,"
-                    " timescaledb.compress_segmentby = 'meta_id', timescaledb.compress_orderby = 'start')"
-                ).format(sql.Identifier(table)))
+                    " timescaledb.compress_segmentby = {}, timescaledb.compress_orderby = {})"
+                ).format(sql.Identifier(table), sql.Literal(segment_col), sql.Literal(time_col)))
             conn.execute(
                 "SELECT add_compression_policy(%s, %s::interval, if_not_exists => TRUE)",
                 (table, compress_after),
@@ -169,6 +195,41 @@ def insert_rows(conn: psycopg.Connection, table: str, meta_id: int, rows: list[d
     ).format(sql.Identifier(table))
     with conn.cursor() as cur:
         cur.executemany(query, values)
+    return len(values)
+
+
+def position_marks(conn: psycopg.Connection) -> dict[str, datetime]:
+    return dict(conn.execute('SELECT entity_id, max("time") FROM positions GROUP BY entity_id').fetchall())
+
+
+def insert_positions(conn: psycopg.Connection, entity_id: str, rows: list[dict]) -> int:
+    """Rows in HA's compressed history format: s = state, a = attributes, lu = last updated (epoch s)."""
+    values = []
+    for r in rows:
+        a = r.get("a") or {}
+        values.append((
+            entity_id,
+            datetime.fromtimestamp(r["lu"], timezone.utc),
+            a.get("friendly_name"),
+            r.get("s"),
+            a.get("latitude"),
+            a.get("longitude"),
+            a.get("gps_accuracy"),
+            a.get("source"),
+        ))
+    if not values:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO positions (entity_id, "time", name, state, latitude, longitude, accuracy, source)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (entity_id, "time") DO UPDATE SET
+                name = EXCLUDED.name, state = EXCLUDED.state, latitude = EXCLUDED.latitude,
+                longitude = EXCLUDED.longitude, accuracy = EXCLUDED.accuracy, source = EXCLUDED.source
+            """,
+            values,
+        )
     return len(values)
 
 

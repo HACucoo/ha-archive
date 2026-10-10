@@ -15,6 +15,7 @@ class Config:
     hourly_since: datetime
     short_days: int
     provisioning_dir: str | None
+    location_entities: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
@@ -34,4 +35,6 @@ class Config:
             # HA keeps 5-minute statistics as long as its recorder keeps states (10 days by default)
             short_days=int(env.get("SHORT_TERM_DAYS", "10")),
             provisioning_dir=env.get("PROVISIONING_DIR") or None,
+            # person.* (or device_tracker.*) whose positions and zones are archived
+            location_entities=tuple(e.strip() for e in env.get("LOCATION_ENTITIES", "").split(",") if e.strip()),
         )

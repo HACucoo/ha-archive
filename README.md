@@ -9,7 +9,8 @@ Because it pulls and does not get pushed to, the archive host may sleep. After a
 - Every statistic HA keeps: all sensors with a `state_class`, energy meters, imported statistics
 - Hourly values back to `HOURLY_SINCE`, 5-minute values from the first run on
 - TimescaleDB compression (falls back to plain tables on stock PostgreSQL)
-- Grafana with a read-only database login, a provisioned datasource and a starter dashboard
+- Optional location history: positions and zones of the people you list, with a map of the route per day and the stays per place, as a self-hosted alternative to Google's timeline
+- Grafana with a read-only database login, a provisioned datasource and two starter dashboards
 
 ## Run
 
@@ -45,6 +46,7 @@ The first run fetches the full hourly history and takes a few minutes. After tha
 | `HOURLY_SINCE` | `2020-01-01` | how far back the first run goes |
 | `SHORT_TERM_DAYS` | `10` | HA's `purge_keep_days` |
 | `PROVISIONING_DIR` | — | where to write the Grafana provisioning (shared volume) |
+| `LOCATION_ENTITIES` | — | comma-separated `person.*` (or `device_tracker.*`) for the location history |
 
 ## Data
 
@@ -53,9 +55,13 @@ The first run fetches the full hourly history and takes a few minutes. After tha
 | `meta` | one row per statistic: `statistic_id`, name, unit, `has_mean`, `has_sum` |
 | `stats_hour`, view `stunde` | hourly rows |
 | `stats_5min`, view `fuenf_minuten` | 5-minute rows |
+| `positions` | one row per location update: `entity_id`, `time`, `name`, `state` (zone, `home`, `not_home`), `latitude`, `longitude`, `accuracy`, `source` |
+| view `aufenthalte` | one row per stay: `name`, `ort`, `beginn`, `ende` |
 | `sync_log` | one row per run |
 
-The views carry `statistic_id`, `name`, `unit`, `time`, `mean`, `min`, `max`, `state`, `sum`. For meters, `sum` is the running total; consumption over a period is the difference of two `sum` values (see the "Verbrauch pro Tag" panel).
+Positions come from HA's state history, which the recorder purges after 10 days, so the archive starts on the day the importer first runs. Use `person.*` rather than the phone's tracker: the history then survives a new phone.
+
+The statistics views carry `statistic_id`, `name`, `unit`, `time`, `mean`, `min`, `max`, `state`, `sum`. For meters, `sum` is the running total; consumption over a period is the difference of two `sum` values (see the "Verbrauch pro Tag" panel).
 
 If statistics were corrected in HA afterwards (Developer tools → Statistics, `recorder.import_statistics`), fetch everything again:
 

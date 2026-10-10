@@ -33,7 +33,24 @@ async def sync_once(ha, conn, cfg, now: datetime | None = None, resync: bool = F
                 total += db.insert_rows(conn, table, meta_id, result.get(statistic_id, []))
                 cursor = end
             conn.commit()
+    total += await sync_positions(ha, conn, cfg, now, resync)
     seconds = time.monotonic() - started
     db.log_sync(conn, total, seconds)
     log.info("synced %d rows for %d series in %.1f s", total, len(meta), seconds)
+    return total
+
+
+async def sync_positions(ha, conn, cfg, now: datetime, resync: bool) -> int:
+    """Positions and zones of the configured people; HA keeps them for the recorder's purge window only."""
+    floor = now - timedelta(days=cfg.short_days)
+    marks = {} if resync else db.position_marks(conn)
+    total = 0
+    for entity_id in cfg.location_entities:
+        cursor = max(marks.get(entity_id, floor), floor)
+        while cursor < now:
+            end = min(cursor + timedelta(days=1), now)
+            result = await ha.history([entity_id], cursor, end)
+            total += db.insert_positions(conn, entity_id, result.get(entity_id, []))
+            cursor = end
+        conn.commit()
     return total

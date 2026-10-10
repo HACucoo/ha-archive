@@ -27,6 +27,8 @@ services:
       GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
       # First run fetches HA's hourly statistics back to this date
       HOURLY_SINCE: "2023-01-01"
+      # People whose positions and zones are archived (HA itself keeps them 10 days only)
+      LOCATION_ENTITIES: person.stephan,person.daniela,person.rosemarie
       PROVISIONING_DIR: /provisioning
     volumes:
       - provisioning:/provisioning
