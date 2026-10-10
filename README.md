@@ -79,6 +79,16 @@ If statistics were corrected in HA afterwards (Developer tools → Statistics, `
 docker exec ha-archive-importer-1 python -m archiv --once --resync
 ```
 
+## Backup
+
+Copying the database folder of a running PostgreSQL does not give a backup you can rely on. The `backup` service in the compose file writes a dump instead, `archiv.dump`, renewed when it is older than 20 hours. Back up that file. To restore into an empty database:
+
+```bash
+docker exec -i ha-archive-db-1 psql -U archiv -d archiv -c "SELECT timescaledb_pre_restore();"
+docker exec -i ha-archive-db-1 pg_restore -U archiv -d archiv --no-owner < archiv.dump
+docker exec -i ha-archive-db-1 psql -U archiv -d archiv -c "SELECT timescaledb_post_restore();"
+```
+
 ## Development
 
 ```bash

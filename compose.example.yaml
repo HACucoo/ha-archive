@@ -35,6 +35,28 @@ services:
       # Google timeline exports for --import-google
       - /mnt/docker-data/ha-archiv/import:/import:ro
 
+  # Daily dump of the archive: a consistent backup, unlike copying the database files while it runs
+  backup:
+    image: timescale/timescaledb:latest-pg17
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${DB_PASSWORD}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        while true; do
+          if [ -z "$$(find /dump -name archiv.dump -mmin -1200)" ]; then
+            pg_dump -h db -U archiv -Fc archiv > /dump/archiv.dump.tmp && mv /dump/archiv.dump.tmp /dump/archiv.dump && echo "dump $$(date)"
+          fi
+          sleep 3600
+        done
+    volumes:
+      - /mnt/docker-data/ha-archiv/dump:/dump
+
   grafana:
     image: grafana/grafana-oss:11.6.0
     restart: unless-stopped
