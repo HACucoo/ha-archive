@@ -1,8 +1,10 @@
 """Google Maps timeline export (on-device "Zeitachse" JSON) -> rows for the positions table.
 
 State per row, so that the aufenthalte view reads Google's history like HA's:
-- a visit Google labels HOME is 'home', WORK is 'Arbeit' (whatever the address was back then);
-  any other visit takes the name of the HA zone it lies in, else 'anderer Ort'
+- a visit labelled HOME is 'home', WORK is 'Arbeit', whatever the address was back then. Google labels
+  each visit on its own and often leaves one at home or work unlabelled, so a place labelled HOME (WORK)
+  at least LABEL_MIN times counts for every visit between its first and last such label
+- any other visit takes the name of the HA zone it lies in, else 'anderer Ort'
 - path points take the state of the visit they fall into, else 'not_home'
 - the start of every activity (a trip) is 'not_home', it ends the stay before
 """
@@ -14,6 +16,8 @@ import re
 from datetime import datetime
 
 HOME, AWAY, OTHER, WORK = "home", "not_home", "anderer Ort", "Arbeit"
+LABEL_MIN = 3
+LABELS = {"HOME": HOME, "INFERRED_HOME": HOME, "WORK": WORK, "INFERRED_WORK": WORK}
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 
 
@@ -65,23 +69,20 @@ def rows(data, zones) -> list[tuple[datetime, str, float, float]]:
     segs = segments(data)
     out: dict[datetime, tuple[str, float, float]] = {}
 
+    top_visits = [s for s in segs if s.get("visit") and s["visit"].get("hierarchyLevel", 0) == 0]
+    windows = _label_windows(top_visits)
+
     visits = []  # (start, end, state)
-    for s in segs:
-        visit = s.get("visit")
-        if not visit or visit.get("hierarchyLevel", 0) != 0:
-            continue
-        top = visit.get("topCandidate", {})
+    for s in top_visits:
+        top = s["visit"].get("topCandidate", {})
         point = parse_latlng(top.get("placeLocation", {}).get("latLng", ""))
         if not point:
             continue
-        kind = top.get("semanticType", "UNKNOWN")
-        if kind in ("HOME", "INFERRED_HOME"):
-            state = HOME
-        elif kind in ("WORK", "INFERRED_WORK"):
-            state = WORK
-        else:
-            state = zone_at(point, zones) or OTHER
         start, end = _time(s["startTime"]), _time(s["endTime"])
+        state = LABELS.get(top.get("semanticType")) or next(
+            (label for label, first, last in windows.get(top.get("placeId"), []) if first <= start <= last),
+            None,
+        ) or zone_at(point, zones) or OTHER
         visits.append((start, end, state))
         out[start] = (state, *point)
         out[end] = (state, *point)
@@ -107,6 +108,21 @@ def rows(data, zones) -> list[tuple[datetime, str, float, float]]:
             out[_time(s["startTime"])] = (AWAY, *point)
 
     return [(t, *v) for t, v in sorted(out.items())]
+
+
+def _label_windows(visits) -> dict[str, list[tuple[str, datetime, datetime]]]:
+    """placeId -> (state, first, last) for HOME/WORK labels seen at least LABEL_MIN times."""
+    seen: dict[tuple[str, str], list[datetime]] = {}
+    for s in visits:
+        top = s["visit"].get("topCandidate", {})
+        label = LABELS.get(top.get("semanticType"))
+        if label and top.get("placeId"):
+            seen.setdefault((top["placeId"], label), []).append(_time(s["startTime"]))
+    windows: dict[str, list] = {}
+    for (place, label), times in seen.items():
+        if len(times) >= LABEL_MIN:
+            windows.setdefault(place, []).append((label, min(times), max(times)))
+    return windows
 
 
 def load(path: str):
