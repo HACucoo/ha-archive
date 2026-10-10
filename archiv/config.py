@@ -1,6 +1,7 @@
 """Settings, all from the environment."""
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -22,9 +23,7 @@ class Config:
         token = env.get("HA_TOKEN", "").strip()
         if not token:
             raise SystemExit("HA_TOKEN is missing (long-lived access token from your HA profile)")
-        since = datetime.fromisoformat(env.get("HOURLY_SINCE", "2020-01-01"))
-        if since.tzinfo is None:
-            since = since.replace(tzinfo=timezone.utc)
+        since = parse_date(env.get("HOURLY_SINCE", "2020-01-01"))
         return cls(
             ha_url=env.get("HA_URL", "http://homeassistant.local:8123").rstrip("/"),
             ha_token=token,
@@ -38,3 +37,16 @@ class Config:
             # person.* (or device_tracker.*) whose positions and zones are archived
             location_entities=tuple(e.strip() for e in env.get("LOCATION_ENTITIES", "").split(",") if e.strip()),
         )
+
+
+def parse_date(raw: str) -> datetime:
+    """ISO date; also takes what Compose makes of an unquoted YAML date ('2023-01-01 00:00:00 +0000 UTC')."""
+    raw = raw.strip()
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError:
+        match = re.match(r"\d{4}-\d{2}-\d{2}", raw)
+        if not match:
+            raise SystemExit(f"HOURLY_SINCE is not a date: {raw!r}")
+        value = datetime.fromisoformat(match.group())
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
