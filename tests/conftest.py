@@ -77,9 +77,6 @@ def pg():
     with psycopg.connect(dsn, autocommit=True) as admin:
         admin.execute("DROP DATABASE IF EXISTS archiv_test WITH (FORCE)")
         admin.execute("CREATE DATABASE archiv_test")
-    test_dsn = dsn.rsplit("/", 1)[0] + "/archiv_test"
-    if "?" in dsn:
-        test_dsn += "?" + dsn.split("?", 1)[1]
-    conn = psycopg.connect(test_dsn)
+    conn = psycopg.connect(psycopg.conninfo.make_conninfo(dsn, dbname="archiv_test"))
     yield conn
     conn.close()

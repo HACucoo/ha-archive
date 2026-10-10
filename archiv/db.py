@@ -119,7 +119,8 @@ def upsert_meta(conn: psycopg.Connection, items: list[dict]) -> dict[str, int]:
             INSERT INTO meta (statistic_id, name, unit, has_mean, has_sum, source)
             VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (statistic_id) DO UPDATE SET
-                name = EXCLUDED.name, unit = EXCLUDED.unit, has_mean = EXCLUDED.has_mean,
+                name = COALESCE(EXCLUDED.name, meta.name), unit = COALESCE(EXCLUDED.unit, meta.unit),
+                has_mean = EXCLUDED.has_mean,
                 has_sum = EXCLUDED.has_sum, source = EXCLUDED.source, last_seen = now()
             RETURNING id
             """,
