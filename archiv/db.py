@@ -233,6 +233,27 @@ def insert_positions(conn: psycopg.Connection, entity_id: str, rows: list[dict])
     return len(values)
 
 
+def replace_google_positions(conn: psycopg.Connection, entity_id: str, name: str | None, rows) -> tuple[int, datetime | None]:
+    """Swap an entity's imported Google rows for new ones. Rows from the moment HA's own data starts are left out."""
+    cutoff = conn.execute(
+        "SELECT min(\"time\") FROM positions WHERE entity_id = %s AND source IS DISTINCT FROM 'google'",
+        (entity_id,),
+    ).fetchone()[0]
+    conn.execute("DELETE FROM positions WHERE entity_id = %s AND source = 'google'", (entity_id,))
+    count = 0
+    with conn.cursor() as cur:
+        with cur.copy(
+            'COPY positions (entity_id, "time", name, state, latitude, longitude, source) FROM STDIN'
+        ) as copy:
+            for t, state, lat, lon in rows:
+                if cutoff and t >= cutoff:
+                    break
+                copy.write_row((entity_id, t, name, state, lat, lon, "google"))
+                count += 1
+    conn.commit()
+    return count, cutoff
+
+
 def log_sync(conn: psycopg.Connection, rows: int, seconds: float) -> None:
     conn.execute(
         "INSERT INTO sync_log (finished, rows, seconds) VALUES (now(), %s, %s)",

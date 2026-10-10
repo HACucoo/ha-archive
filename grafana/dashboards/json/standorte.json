@@ -39,7 +39,7 @@
       "options": {
         "view": { "id": "fit", "allLayers": true, "lat": 48.99, "lon": 12.08, "zoom": 13, "padding": 10 },
         "controls": { "showZoom": true, "mouseWheelZoom": true, "showAttribution": true },
-        "basemap": { "type": "default", "name": "Karte" },
+        "basemap": { "type": "osm-standard", "name": "OpenStreetMap", "config": {} },
         "layers": [
           {
             "type": "route",

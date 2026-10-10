@@ -62,6 +62,9 @@ class HAClient:
                 raise HAError(f"{msg_type}: {err.get('code')} {err.get('message')}")
             return msg.get("result")
 
+    async def states(self) -> list[dict]:
+        return await self.call("get_states")
+
     async def statistic_ids(self) -> list[dict]:
         return await self.call("recorder/list_statistic_ids")
 

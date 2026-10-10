@@ -32,6 +32,8 @@ services:
       PROVISIONING_DIR: /provisioning
     volumes:
       - provisioning:/provisioning
+      # Google timeline exports for --import-google
+      - /mnt/docker-data/ha-archiv/import:/import:ro
 
   grafana:
     image: grafana/grafana-oss:11.6.0
@@ -47,6 +49,8 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/json/ha-archiv.json
+      # CARTO, Grafana's default map, wants an API key now; OpenStreetMap does not
+      GF_GEOMAP_DEFAULT_BASELAYER_CONFIG: '{"type": "osm-standard", "config": {}}'
     ports:
       - 3030:3000
     volumes:

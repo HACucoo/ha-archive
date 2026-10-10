@@ -61,6 +61,16 @@ The first run fetches the full hourly history and takes a few minutes. After tha
 
 Positions come from HA's state history, which the recorder purges after 10 days, so the archive starts on the day the importer first runs. Use `person.*` rather than the phone's tracker: the history then survives a new phone.
 
+### Google timeline
+
+Older history can come from Google Maps. Since 2024 the timeline lives on the phone: Settings → Location → Location services → Timeline → Export timeline data (on an iPhone: Google Maps → Settings → Personal content). Put the JSON into the import folder and run, once per person:
+
+```bash
+docker exec ha-archive-importer-1 python -m archiv --import-google /import/Zeitachse.json --entity person.stephan
+```
+
+Visits Google labels home or work become `Zuhause` and `Arbeit` (whatever the address was back then), other visits take the name of the HA zone they lie in, or `anderer Ort`. Trips are `unterwegs`. Rows from the moment HA's own data starts are left out, and importing again replaces the earlier import.
+
 The statistics views carry `statistic_id`, `name`, `unit`, `time`, `mean`, `min`, `max`, `state`, `sum`. For meters, `sum` is the running total; consumption over a period is the difference of two `sum` values (see the "Verbrauch pro Tag" panel).
 
 If statistics were corrected in HA afterwards (Developer tools → Statistics, `recorder.import_statistics`), fetch everything again:
