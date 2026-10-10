@@ -1,4 +1,4 @@
-# ha-archiv
+# ha-archive
 
 Keeps Home Assistant's statistics for good, in PostgreSQL/TimescaleDB, with Grafana on top.
 
@@ -60,7 +60,7 @@ The views carry `statistic_id`, `name`, `unit`, `time`, `mean`, `min`, `max`, `s
 If statistics were corrected in HA afterwards (Developer tools → Statistics, `recorder.import_statistics`), fetch everything again:
 
 ```bash
-docker exec ha-archiv-importer-1 python -m archiv --once --resync
+docker exec ha-archive-importer-1 python -m archiv --once --resync
 ```
 
 ## Development
