@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import db, google
 from .config import Config
+from .geo import Places
 from .ha import HAClient
 from .sync import sync_once
 
@@ -64,6 +65,8 @@ async def import_google(cfg: Config, path: str, entity_id: str) -> None:
     with db.connect(cfg.pg_dsn) as conn:
         db.setup(conn, cfg.ro_password)
         count, cutoff = db.replace_google_positions(conn, entity_id, person["attributes"].get("friendly_name"), rows)
+        if Places.available():
+            log.info("named %d place squares", db.fill_place_names(conn, Places()))
     first = rows[0][0].date() if rows else None
     log.info("imported %d Google rows for %s from %s%s", count, entity_id, first,
              f", up to where HA's own data starts ({cutoff:%Y-%m-%d %H:%M})" if cutoff else "")

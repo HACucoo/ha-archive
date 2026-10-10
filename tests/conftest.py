@@ -19,6 +19,7 @@ class FakeHA:
         self.statistic_ids = []
         self.rows = {}  # (statistic_id, period) -> list of rows with start in ms
         self.history = {}  # entity_id -> list of compressed state rows (s, a, lu)
+        self.states = [{"entity_id": "zone.home", "attributes": {"latitude": 48.9947, "longitude": 12.0762}}]
 
     async def handler(self, ws):
         await ws.send(json.dumps({"type": "auth_required", "ha_version": "2026.9.1"}))
@@ -35,6 +36,8 @@ class FakeHA:
             await ws.send(json.dumps(self.answer(msg)))
 
     def answer(self, msg):
+        if msg["type"] == "get_states":
+            return {"id": msg["id"], "type": "result", "success": True, "result": self.states}
         if msg["type"] == "recorder/list_statistic_ids":
             return {"id": msg["id"], "type": "result", "success": True, "result": self.statistic_ids}
         if msg["type"] == "recorder/statistics_during_period":

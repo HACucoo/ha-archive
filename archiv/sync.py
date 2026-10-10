@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from . import db
+from .geo import Places
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +35,8 @@ async def sync_once(ha, conn, cfg, now: datetime | None = None, resync: bool = F
                 cursor = end
             conn.commit()
     total += await sync_positions(ha, conn, cfg, now, resync)
+    if cfg.location_entities:
+        await update_places(ha, conn)
     seconds = time.monotonic() - started
     db.log_sync(conn, total, seconds)
     log.info("synced %d rows for %d series in %.1f s", total, len(meta), seconds)
@@ -54,3 +57,21 @@ async def sync_positions(ha, conn, cfg, now: datetime, resync: bool) -> int:
             cursor = end
         conn.commit()
     return total
+
+
+_places: Places | None = None
+
+
+async def update_places(ha, conn) -> None:
+    """Home coordinates and town names for the "heute vor" view."""
+    global _places
+    home = next((s for s in await ha.states() if s["entity_id"] == "zone.home"), None)
+    if home:
+        db.set_home(conn, home["attributes"]["latitude"], home["attributes"]["longitude"])
+    if not Places.available():
+        return
+    if _places is None:
+        _places = Places()
+    named = db.fill_place_names(conn, _places)
+    if named:
+        log.info("named %d new place squares", named)

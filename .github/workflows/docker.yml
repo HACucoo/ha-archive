@@ -58,3 +58,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Keeps the GeoNames stage, so the 200 MB download happens only when tools/build_geo.py changes
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

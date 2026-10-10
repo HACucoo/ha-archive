@@ -71,6 +71,46 @@ CREATE OR REPLACE VIEW aufenthalte AS
         min("time") AS beginn,
         lead(min("time")) OVER (PARTITION BY entity_id ORDER BY min("time")) AS ende
     FROM stays GROUP BY entity_id, state, nr;
+CREATE TABLE IF NOT EXISTS heim (
+    id        integer PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    latitude  double precision NOT NULL,
+    longitude double precision NOT NULL
+);
+-- Nearest town per ~1 km square of the positions, from GeoNames; ort is NULL far from any town
+CREATE TABLE IF NOT EXISTS orte_namen (
+    lat2 numeric(5, 2) NOT NULL,
+    lon2 numeric(5, 2) NOT NULL,
+    ort  text,
+    land text,
+    km   real,
+    PRIMARY KEY (lat2, lon2)
+);
+-- "Heute vor X Jahren": per person and earlier year the place furthest from home on this calendar day,
+-- for today and tomorrow (so it is at hand for a morning briefing while the archive host sleeps)
+CREATE OR REPLACE VIEW heute_vor AS
+    WITH tage AS (
+        SELECT ((now() AT TIME ZONE 'Europe/Berlin')::date + n) AS tag FROM generate_series(0, 1) n
+    ), punkte AS (
+        SELECT t.tag, p.entity_id, p.name, p.latitude, p.longitude,
+            extract(year FROM t.tag)::int - extract(year FROM p."time" AT TIME ZONE 'Europe/Berlin')::int AS jahre,
+            2 * 6371 * asin(sqrt(power(sin(radians(p.latitude - h.latitude) / 2), 2)
+                + cos(radians(h.latitude)) * cos(radians(p.latitude))
+                * power(sin(radians(p.longitude - h.longitude) / 2), 2))) AS km
+        FROM tage t
+        JOIN positions p
+            ON to_char(p."time" AT TIME ZONE 'Europe/Berlin', 'MM-DD') = to_char(t.tag, 'MM-DD')
+            AND (p."time" AT TIME ZONE 'Europe/Berlin')::date < t.tag
+        CROSS JOIN heim h
+        WHERE p.latitude IS NOT NULL
+    ), weitester AS (
+        SELECT DISTINCT ON (tag, entity_id, jahre) * FROM punkte
+        WHERE jahre > 0
+        ORDER BY tag, entity_id, jahre, km DESC
+    )
+    SELECT to_char(w.tag, 'MM-DD') AS tag, w.entity_id, w.name, w.jahre, o.ort, o.land, round(w.km)::integer AS km
+    FROM weitester w
+    JOIN orte_namen o ON o.lat2 = round(w.latitude::numeric, 2) AND o.lon2 = round(w.longitude::numeric, 2)
+    WHERE w.km >= 50 AND o.ort IS NOT NULL;
 """
 
 
@@ -252,6 +292,36 @@ def replace_google_positions(conn: psycopg.Connection, entity_id: str, name: str
                 count += 1
     conn.commit()
     return count, cutoff
+
+
+def set_home(conn: psycopg.Connection, latitude: float, longitude: float) -> None:
+    conn.execute(
+        "INSERT INTO heim (id, latitude, longitude) VALUES (1, %s, %s)"
+        " ON CONFLICT (id) DO UPDATE SET latitude = EXCLUDED.latitude, longitude = EXCLUDED.longitude",
+        (latitude, longitude),
+    )
+    conn.commit()
+
+
+def fill_place_names(conn: psycopg.Connection, places) -> int:
+    """Name every ~1 km square that positions reach and orte_namen does not know yet."""
+    missing = conn.execute(
+        """
+        SELECT DISTINCT round(latitude::numeric, 2), round(longitude::numeric, 2) FROM positions p
+        WHERE latitude IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM orte_namen o
+            WHERE o.lat2 = round(p.latitude::numeric, 2) AND o.lon2 = round(p.longitude::numeric, 2))
+        """
+    ).fetchall()
+    if not missing:
+        return 0
+    with conn.cursor() as cur:
+        with cur.copy("COPY orte_namen (lat2, lon2, ort, land, km) FROM STDIN") as copy:
+            for lat2, lon2 in missing:
+                hit = places.nearest(float(lat2), float(lon2))
+                copy.write_row((lat2, lon2, *(hit if hit else (None, None, None))))
+    conn.commit()
+    return len(missing)
 
 
 def log_sync(conn: psycopg.Connection, rows: int, seconds: float) -> None:

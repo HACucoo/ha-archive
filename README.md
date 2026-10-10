@@ -57,6 +57,8 @@ The first run fetches the full hourly history and takes a few minutes. After tha
 | `stats_5min`, view `fuenf_minuten` | 5-minute rows |
 | `positions` | one row per location update: `entity_id`, `time`, `name`, `state` (zone, `home`, `not_home`), `latitude`, `longitude`, `accuracy`, `source` |
 | view `aufenthalte` | one row per stay: `name`, `ort`, `beginn`, `ende` |
+| `heim`, `orte_namen` | home coordinates from HA's `zone.home`; nearest town per ~1 km square of the positions |
+| view `heute_vor` | "on this day": per person and earlier year the place furthest from home on today's and tomorrow's date (at least 50 km away) |
 | `sync_log` | one row per run |
 
 Positions come from HA's state history, which the recorder purges after 10 days, so the archive starts on the day the importer first runs. Use `person.*` rather than the phone's tracker: the history then survives a new phone.
@@ -88,6 +90,10 @@ docker exec -i ha-archive-db-1 psql -U archiv -d archiv -c "SELECT timescaledb_p
 docker exec -i ha-archive-db-1 pg_restore -U archiv -d archiv --no-owner < archiv.dump
 docker exec -i ha-archive-db-1 psql -U archiv -d archiv -c "SELECT timescaledb_post_restore();"
 ```
+
+## Place names
+
+Town and country names come from [GeoNames](https://www.geonames.org/) (towns from 1000 inhabitants, German names where available), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The image carries them, so positions are named offline and never leave the archive host.
 
 ## Development
 
