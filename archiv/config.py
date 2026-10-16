@@ -20,6 +20,10 @@ class Config:
     state_entities: tuple[str, ...] = ()
     state_exclude: tuple[str, ...] = ()
     weather_history: bool = False
+    # name -> sheet link, from SHEET_<NAME>
+    sheets: tuple[tuple[str, str], ...] = ()
+    sheets_dir: str | None = None
+    private_password: str | None = None
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
@@ -44,6 +48,12 @@ class Config:
             state_exclude=split(env.get("STATE_EXCLUDE", "")),
             # Daily mean temperature at home from Open-Meteo, e.g. for heating degree days
             weather_history=env.get("WEATHER_HISTORY", "").strip().lower() in ("1", "true", "yes", "on"),
+            sheets=tuple(sorted((k[len("SHEET_"):].lower(), v.strip()) for k, v in env.items()
+                                if k.startswith("SHEET_") and v.strip())),
+            # Where a copy of each sheet version goes (a volume on the host)
+            sheets_dir=env.get("SHEETS_DIR") or None,
+            # Login for the private schema (sheets), for a second Grafana organisation
+            private_password=env.get("GRAFANA_PRIVATE_DB_PASSWORD") or None,
         )
 
 

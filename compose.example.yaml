@@ -31,11 +31,16 @@ services:
       LOCATION_ENTITIES: person.stephan,person.daniela,person.rosemarie
       STATE_ENTITIES: binary_sensor.*,light.*,switch.*,input_boolean.*
       WEATHER_HISTORY: "true"
+      # Google Sheets: the link stays in .env (SHEET_PRIVAT=https://docs.google.com/spreadsheets/d/…)
+      SHEET_PRIVAT: ${SHEET_PRIVAT}
+      SHEETS_DIR: /sheets
+      GRAFANA_PRIVATE_DB_PASSWORD: ${GRAFANA_PRIVATE_DB_PASSWORD}
       PROVISIONING_DIR: /provisioning
     volumes:
       - provisioning:/provisioning
       # Google timeline exports for --import-google
       - /mnt/docker-data/ha-archiv/import:/import:ro
+      - /mnt/docker-data/ha-archiv/sheets:/sheets
 
   # Daily dump of the archive: a consistent backup, unlike copying the database files while it runs
   backup:

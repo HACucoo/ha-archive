@@ -1,5 +1,6 @@
 """PostgreSQL side: schema, metadata, upserts. TimescaleDB is used when available."""
 
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -102,6 +103,21 @@ CREATE OR REPLACE VIEW gradtage AS
         CASE WHEN temp_mittel < 15 THEN 20 - temp_mittel ELSE 0 END AS gradtagzahl,
         CASE WHEN temp_mittel < 15 THEN 15 - temp_mittel ELSE 0 END AS heizgradtage
     FROM wetter_tag;
+-- Private schema: Google Sheets. Not readable by grafana_ro, only by grafana_privat
+CREATE SCHEMA IF NOT EXISTS privat;
+CREATE TABLE IF NOT EXISTS privat.sheet_quellen (
+    quelle      text PRIMARY KEY,
+    fingerprint text,
+    geaendert   timestamptz,
+    abgerufen   timestamptz
+);
+CREATE TABLE IF NOT EXISTS privat.sheet_zeilen (
+    quelle text NOT NULL,
+    blatt  text NOT NULL,
+    zeile  integer NOT NULL,
+    daten  jsonb NOT NULL,
+    PRIMARY KEY (quelle, blatt, zeile)
+);
 CREATE TABLE IF NOT EXISTS sync_marken (
     name text PRIMARY KEY,
     zeit timestamptz NOT NULL
@@ -153,7 +169,7 @@ def connect(dsn: str) -> psycopg.Connection:
     return psycopg.connect(dsn)
 
 
-def setup(conn: psycopg.Connection, ro_password: str | None = None) -> bool:
+def setup(conn: psycopg.Connection, ro_password: str | None = None, private_password: str | None = None) -> bool:
     """Create tables and views; returns True when TimescaleDB is in use."""
     timescale = _try(conn, "CREATE EXTENSION IF NOT EXISTS timescaledb")
     conn.execute(SCHEMA)
@@ -182,7 +198,22 @@ def setup(conn: psycopg.Connection, ro_password: str | None = None) -> bool:
         conn.commit()
     if ro_password:
         _readonly_role(conn, ro_password)
+    if private_password:
+        _private_role(conn, private_password)
     return timescale
+
+
+def _private_role(conn, password: str) -> None:
+    """Login role that reads the private schema and nothing else."""
+    conn.execute(
+        "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'grafana_privat')"
+        " THEN CREATE ROLE grafana_privat LOGIN; END IF; END $$"
+    )
+    conn.execute(sql.SQL("ALTER ROLE grafana_privat WITH LOGIN PASSWORD {}").format(sql.Literal(password)))
+    conn.execute("GRANT USAGE ON SCHEMA privat TO grafana_privat")
+    conn.execute("GRANT SELECT ON ALL TABLES IN SCHEMA privat TO grafana_privat")
+    conn.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA privat GRANT SELECT ON TABLES TO grafana_privat")
+    conn.commit()
 
 
 def _try(conn, statement) -> bool:
@@ -437,3 +468,33 @@ def upsert_weather(conn: psycopg.Connection, rows) -> int:
             values,
         )
     return len(values)
+
+
+def sheet_fingerprint(conn: psycopg.Connection, quelle: str) -> str | None:
+    row = conn.execute("SELECT fingerprint FROM privat.sheet_quellen WHERE quelle = %s", (quelle,)).fetchone()
+    return row[0] if row else None
+
+
+def replace_sheet(conn: psycopg.Connection, quelle: str, tabs: dict, fingerprint: str, now: datetime) -> int:
+    """Swap all rows of a sheet for the new ones, in one transaction."""
+    conn.execute("DELETE FROM privat.sheet_zeilen WHERE quelle = %s", (quelle,))
+    count = 0
+    with conn.cursor() as cur:
+        with cur.copy("COPY privat.sheet_zeilen (quelle, blatt, zeile, daten) FROM STDIN") as copy:
+            for blatt, rows in tabs.items():
+                for zeile, daten in rows:
+                    copy.write_row((quelle, blatt, zeile, json.dumps(daten, ensure_ascii=False, default=str)))
+                    count += 1
+    conn.execute(
+        "INSERT INTO privat.sheet_quellen (quelle, fingerprint, geaendert, abgerufen) VALUES (%s, %s, %s, %s)"
+        " ON CONFLICT (quelle) DO UPDATE SET fingerprint = EXCLUDED.fingerprint,"
+        " geaendert = EXCLUDED.geaendert, abgerufen = EXCLUDED.abgerufen",
+        (quelle, fingerprint, now, now),
+    )
+    conn.commit()
+    return count
+
+
+def sheet_checked(conn: psycopg.Connection, quelle: str, now: datetime) -> None:
+    conn.execute("UPDATE privat.sheet_quellen SET abgerufen = %s WHERE quelle = %s", (now, quelle))
+    conn.commit()

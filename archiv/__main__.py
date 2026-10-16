@@ -39,7 +39,7 @@ async def run(cfg: Config, once: bool, resync: bool) -> None:
         try:
             with db.connect(cfg.pg_dsn) as conn:
                 if not ready:
-                    timescale = db.setup(conn, cfg.ro_password)
+                    timescale = db.setup(conn, cfg.ro_password, cfg.private_password)
                     log.info("database ready (TimescaleDB: %s)", "yes" if timescale else "no")
                     ready = True
                 async with HAClient(cfg.ha_url, cfg.ha_token) as ha:

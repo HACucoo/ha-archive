@@ -5,8 +5,9 @@ import fnmatch
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from . import db, wetter
+from . import db, sheets, wetter
 from .geo import Places
 
 log = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ async def sync_once(ha, conn, cfg, now: datetime | None = None, resync: bool = F
         if cfg.location_entities:
             update_places(conn)
         total += await sync_weather(conn, cfg, now)
+    total += await sync_sheets(conn, cfg, now)
     seconds = time.monotonic() - started
     db.log_sync(conn, total, seconds)
     log.info("synced %d rows for %d series in %.1f s", total, len(meta), seconds)
@@ -128,6 +130,30 @@ async def sync_weather(conn, cfg, now: datetime, fetch=None) -> int:
     db.set_mark(conn, "wetter", now)
     conn.commit()
     return count
+
+
+async def sync_sheets(conn, cfg, now: datetime, download=None) -> int:
+    """Each configured sheet: a new version is kept as a file and replaces its rows. The link is never logged."""
+    total = 0
+    for name, url in cfg.sheets:
+        try:
+            data = await asyncio.to_thread(download or sheets.download, url)
+            tabs = sheets.read(data)
+        except Exception as err:  # noqa: BLE001 — keep the last version, try again next run
+            log.warning("sheet %s not fetched, keeping the last version: %s", name, err)
+            continue
+        fingerprint = sheets.fingerprint(tabs)
+        if fingerprint == db.sheet_fingerprint(conn, name):
+            db.sheet_checked(conn, name, now)
+            continue
+        if cfg.sheets_dir:
+            folder = Path(cfg.sheets_dir) / name
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / f"{now.astimezone():%Y-%m-%d_%H%M}.xlsx").write_bytes(data)
+        count = db.replace_sheet(conn, name, tabs, fingerprint, now)
+        log.info("sheet %s changed: %d rows in %d tabs", name, count, len(tabs))
+        total += count
+    return total
 
 
 def set_home(conn, states: list[dict]) -> None:

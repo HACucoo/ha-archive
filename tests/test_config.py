@@ -31,3 +31,11 @@ def test_state_and_weather_settings():
     assert cfg.state_exclude == ("binary_sensor.*_update",)
     assert cfg.weather_history is True
     assert Config.from_env({"HA_TOKEN": "t"}).weather_history is False
+
+
+def test_sheet_settings():
+    cfg = Config.from_env({"HA_TOKEN": "t", "SHEET_ZWEI": "https://b", "SHEET_EINS": " https://a ", "SHEET_LEER": "",
+                           "SHEETS_DIR": "/sheets", "GRAFANA_PRIVATE_DB_PASSWORD": "p"})
+    assert cfg.sheets == (("eins", "https://a"), ("zwei", "https://b"))
+    assert cfg.sheets_dir == "/sheets"
+    assert cfg.private_password == "p"

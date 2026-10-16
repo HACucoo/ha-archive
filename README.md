@@ -12,6 +12,7 @@ Because it pulls and does not get pushed to, the archive host may sleep. After a
 - Optional location history: positions and zones of the people you list, with a map of the route per day and the stays per place, as a self-hosted alternative to Google's timeline
 - Optional state history: every state change of the entities you pick (doors, lights, presence …), without attributes
 - Optional daily temperature at home from Open-Meteo, with heating degree days
+- Optional Google Sheets: each version kept as an .xlsx file, the rows in a private schema that the shared Grafana login cannot read
 - Grafana with a read-only database login, a provisioned datasource and two starter dashboards
 
 ## Run
@@ -51,6 +52,9 @@ The first run fetches the full hourly history and takes a few minutes. After tha
 | `LOCATION_ENTITIES` | — | comma-separated `person.*` (or `device_tracker.*`) for the location history |
 | `STATE_ENTITIES` | — | comma-separated entity patterns whose state changes are archived, e.g. `binary_sensor.*,light.*,input_boolean.*` |
 | `STATE_EXCLUDE` | — | patterns left out of `STATE_ENTITIES`, e.g. `binary_sensor.*_update_available` |
+| `SHEET_<NAME>` | — | link of a Google Sheet shared as "anyone with the link can view"; one variable per sheet, `<NAME>` becomes its name |
+| `SHEETS_DIR` | — | folder (a volume) for the .xlsx versions |
+| `GRAFANA_PRIVATE_DB_PASSWORD` | — | creates/updates the role `grafana_privat`, which reads the private schema only |
 | `WEATHER_HISTORY` | `false` | `true`: daily mean/min/max temperature at `zone.home` from [Open-Meteo](https://open-meteo.com/en/docs/historical-weather-api), back to `HOURLY_SINCE` |
 
 ## Data
@@ -69,13 +73,26 @@ The first run fetches the full hourly history and takes a few minutes. After tha
 | view `zustand_phasen` | one row per phase: `entity_id`, `name`, `state`, `beginn`, `ende` |
 | `wetter_tag` | daily `temp_mittel`, `temp_min`, `temp_max` at home |
 | view `gradtage` | per day `gradtagzahl` (G20/15 after VDI 3807) and `heizgradtage` (HGT15) |
+| `privat.sheet_zeilen` | one row per sheet row: `quelle` (sheet name), `blatt` (tab), `zeile` (row number), `daten` (jsonb, column header → value) |
+| `privat.sheet_quellen` | per sheet: fingerprint of the values, when they last changed, when last fetched |
 | `sync_log` | one row per run |
 
 Positions and states come from HA's state history, which the recorder purges after 10 days, so the archive starts ten days before the importer first runs. Reading it adds no writes to HA's database: the recorder stores these states anyway. States are fetched without attributes and only on a change, each entity from where it stopped; an entity that starts matching later is fetched from the start of HA's window.
 
 The weather comes from Open-Meteo's reanalysis, once a day, with the home position rounded to 0.1° (about 10 km). It trails real time by a few days, so the last ten days are fetched again each time.
 
-Positions come from HA's state history too. Use `person.*` rather than the phone's tracker: the history then survives a new phone.
+Positions come from HA's state history too.
+
+### Google Sheets
+
+Every run downloads each sheet as .xlsx. When a value changed, the file is kept in `SHEETS_DIR/<name>/` and the rows in `privat.sheet_zeilen` are replaced; an unchanged sheet leaves both alone, a failed download keeps the last version. Each tab becomes rows of `{header: value}`: the header row is the first row with at least two text cells, columns without a header are named by their letter, dates come as ISO text. The link is never written to the log.
+
+Anonymous Grafana viewers can query every datasource of their organisation, not only look at dashboards. The sheets therefore live in the schema `privat`, which `grafana_ro` cannot read. To look at them in Grafana, set `GRAFANA_PRIVATE_DB_PASSWORD`, then as admin: Administration → Organizations → New organisation (e.g. "Privat"), switch to it, add a PostgreSQL datasource (`db:5432`, database `archiv`, user `grafana_privat`, TLS off) and build or import the dashboards there. Anonymous access stays in the main organisation.
+
+```sql
+SELECT (daten->>'Datum')::date AS tag, daten->>'Beschreibung' AS text
+FROM privat.sheet_zeilen WHERE quelle = 'name' AND blatt = 'Tab' ORDER BY zeile;
+``` Use `person.*` rather than the phone's tracker: the history then survives a new phone.
 
 ### Google timeline
 

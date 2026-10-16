@@ -1,11 +1,12 @@
 from datetime import datetime, timedelta, timezone
 
+import psycopg
 import pytest
 
 from archiv import db, wetter
 from archiv.config import Config
 from archiv.ha import HAClient
-from archiv.sync import sync_once, sync_weather, wanted_entities
+from archiv.sync import sync_once, sync_sheets, sync_weather, wanted_entities
 
 NOW = datetime(2026, 10, 10, 20, tzinfo=timezone.utc)
 
@@ -232,3 +233,52 @@ def test_open_meteo_rows():
                       "temperature_2m_min": [4.1, None], "temperature_2m_max": [14.0, None]}}
     assert wetter.rows(data) == [(datetime(2026, 10, 1).date(), 9.4, 4.1, 14.0),
                                  (datetime(2026, 10, 2).date(), None, None, None)]
+
+
+async def test_sheets(pg, tmp_path):
+    from test_sheets import workbook
+
+    db.setup(pg, ro_password="ro", private_password="pv")
+    settings = cfg(sheets=(("eins", "https://docs.google.com/spreadsheets/d/x/edit"),), sheets_dir=str(tmp_path))
+    version = {"data": workbook({"T": [["Datum", "Wert"], [datetime(2026, 1, 1), 1], [datetime(2026, 1, 2), 2]]})}
+
+    def download(url):
+        return version["data"]
+
+    assert await sync_sheets(pg, settings, NOW, download) == 2
+    assert len(list((tmp_path / "eins").iterdir())) == 1
+    rows = pg.execute("SELECT blatt, zeile, daten->>'Datum', (daten->>'Wert')::int FROM privat.sheet_zeilen"
+                      " ORDER BY zeile").fetchall()
+    assert rows == [("T", 2, "2026-01-01", 1), ("T", 3, "2026-01-02", 2)]
+
+    # Unchanged: no new file, rows untouched, only the check time moves on
+    assert await sync_sheets(pg, settings, NOW + timedelta(hours=1), download) == 0
+    assert len(list((tmp_path / "eins").iterdir())) == 1
+    assert pg.execute("SELECT geaendert, abgerufen FROM privat.sheet_quellen").fetchone() == (
+        NOW, NOW + timedelta(hours=1))
+
+    # Changed: a new version, rows replaced
+    version["data"] = workbook({"T": [["Datum", "Wert"], [datetime(2026, 1, 1), 5]]})
+    assert await sync_sheets(pg, settings, NOW + timedelta(hours=2), download) == 1
+    assert len(list((tmp_path / "eins").iterdir())) == 2
+    assert pg.execute("SELECT count(*) FROM privat.sheet_zeilen").fetchone()[0] == 1
+
+    # Not reachable: the last version stays
+    def broken(url):
+        raise OSError("offline")
+
+    assert await sync_sheets(pg, settings, NOW + timedelta(hours=3), broken) == 0
+    assert pg.execute("SELECT count(*) FROM privat.sheet_zeilen").fetchone()[0] == 1
+
+
+def test_private_schema_is_private(pg):
+    db.setup(pg, ro_password="ro", private_password="pv")
+    pg.execute("SET ROLE grafana_ro")
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        pg.execute("SELECT * FROM privat.sheet_zeilen")
+    pg.rollback()
+    pg.execute("SET ROLE grafana_privat")
+    pg.execute("SELECT * FROM privat.sheet_zeilen")
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        pg.execute("SELECT * FROM meta")
+    pg.rollback()
