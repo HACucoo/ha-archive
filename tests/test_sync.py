@@ -2,10 +2,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from archiv import db
+from archiv import db, wetter
 from archiv.config import Config
 from archiv.ha import HAClient
-from archiv.sync import sync_once
+from archiv.sync import sync_once, sync_weather, wanted_entities
 
 NOW = datetime(2026, 10, 10, 20, tzinfo=timezone.utc)
 
@@ -130,3 +130,105 @@ async def test_positions_and_stays(pg, fake_ha):
     async with HAClient(fake_ha.url, "good") as ha:
         await sync_once(ha, pg, cfg(location_entities=("person.stephan",)), now=NOW + timedelta(hours=1))
     assert pg.execute("SELECT count(*) FROM positions").fetchone()[0] == 7
+
+
+def changes(start, steps):
+    """steps: (minutes after start, state); HA's minimal format, the first row a full one with lc"""
+    rows = [{"s": st, "lu": (start + timedelta(minutes=m)).timestamp()} for m, st in steps]
+    if rows:
+        rows[0] = {"s": rows[0]["s"], "a": {}, "lu": rows[0]["lu"] + 1, "lc": rows[0]["lu"]}
+    return rows
+
+
+def entity(entity_id, name):
+    return {"entity_id": entity_id, "state": "off", "attributes": {"friendly_name": name}}
+
+
+def test_wanted_entities():
+    states = [entity("binary_sensor.door", "Tür"), entity("binary_sensor.fw_update", "Update"),
+              entity("light.lamp", "Lampe"), entity("sensor.t", "T")]
+    wanted = wanted_entities(cfg(state_entities=("binary_sensor.*", "light.*"),
+                                 state_exclude=("binary_sensor.*_update",)), states)
+    assert wanted == {"binary_sensor.door": "Tür", "light.lamp": "Lampe"}
+
+
+async def test_state_changes(pg, fake_ha):
+    db.setup(pg)
+    settings = cfg(state_entities=("binary_sensor.*",))
+    fake_ha.states += [entity("binary_sensor.door", "Haustür"), entity("light.lamp", "Lampe")]
+    start = NOW - timedelta(hours=5)
+    fake_ha.history["binary_sensor.door"] = changes(start, [(0, "off"), (60, "on"), (75, "off")])
+    fake_ha.history["light.lamp"] = changes(start, [(0, "on")])
+    # Older than HA keeps anyway: never asked for
+    fake_ha.history["binary_sensor.door"].insert(0, {"s": "on", "lu": (NOW - timedelta(days=20)).timestamp()})
+
+    async with HAClient(fake_ha.url, "good") as ha:
+        await sync_once(ha, pg, settings, now=NOW)
+    assert pg.execute("SELECT count(*), count(DISTINCT entity_id) FROM zustaende").fetchone() == (3, 1)
+    # The full first row counts from its last_changed, not from an attribute update
+    assert pg.execute('SELECT min("time") FROM zustaende').fetchone()[0] == start
+    requests = [r for r in fake_ha.requests if r["type"] == "history/history_during_period"]
+    assert all(r["minimal_response"] and r["no_attributes"] and r["include_start_time_state"] is False
+               for r in requests)
+    assert min(r["start_time"] for r in requests) >= (NOW - timedelta(days=10)).isoformat()
+    phases = pg.execute(
+        "SELECT name, state, extract(epoch FROM ende - beginn) / 60 FROM zustand_phasen ORDER BY beginn"
+    ).fetchall()
+    assert phases == [("Haustür", "off", 60), ("Haustür", "on", 15), ("Haustür", "off", None)]
+
+    # Next run: only from where it stopped (minus the overlap), no doubles; a newly matching entity
+    # is fetched from the start of HA's window
+    fake_ha.requests.clear()
+    later = NOW + timedelta(hours=1)
+    fake_ha.history["binary_sensor.door"] += changes(NOW + timedelta(minutes=30), [(0, "on")])
+    fake_ha.states.append(entity("binary_sensor.window", "Fenster"))
+    fake_ha.history["binary_sensor.window"] = changes(NOW - timedelta(days=3), [(0, "on"), (10, "off")])
+    async with HAClient(fake_ha.url, "good") as ha:
+        await sync_once(ha, pg, settings, now=later)
+    assert pg.execute("SELECT count(*) FROM zustaende").fetchone()[0] == 6
+    requests = [r for r in fake_ha.requests if r["type"] == "history/history_during_period"]
+    door = [r for r in requests if "binary_sensor.door" in r["entity_ids"]]
+    assert door and min(r["start_time"] for r in door) == (NOW - timedelta(minutes=10)).isoformat()
+    assert "binary_sensor.window" not in door[0]["entity_ids"]
+    assert pg.execute("SELECT count(*) FROM zustand_entitaeten WHERE bis = %s", (later,)).fetchone()[0] == 2
+
+
+async def test_weather(pg, fake_ha, monkeypatch):
+    db.setup(pg)
+    settings = cfg(weather_history=True, hourly_since=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    calls = []
+
+    def fetch(lat, lon, start, end):
+        calls.append((lat, lon, start, end))
+        days = (end - start).days + 1
+        # The last two days are not in the reanalysis yet
+        return [(start + timedelta(days=i), None if i >= days - 2 else 10.0 + i % 8, 5.0, 15.0) for i in range(days)]
+
+    monkeypatch.setattr(wetter, "fetch", fetch)
+    async with HAClient(fake_ha.url, "good") as ha:
+        await sync_once(ha, pg, settings, now=NOW)
+    assert db.home(pg) == (48.9947, 12.0762)
+    assert calls == [(48.9947, 12.0762, datetime(2026, 9, 1).date(), datetime(2026, 10, 9).date())]
+    assert pg.execute("SELECT count(*), max(tag) FROM wetter_tag").fetchone() == (37, datetime(2026, 10, 7).date())
+
+    # Within 20 hours: nothing; a day later the last ten days again
+    assert await sync_weather(pg, settings, NOW + timedelta(hours=5)) == 0
+    await sync_weather(pg, settings, NOW + timedelta(days=1))
+    assert calls[-1][2] == datetime(2026, 9, 27).date()
+    row = pg.execute("SELECT gradtagzahl, heizgradtage FROM gradtage WHERE tag = '2026-09-01'").fetchone()
+    assert row == (10.0, 5.0)
+    assert pg.execute("SELECT max(gradtagzahl) FROM gradtage WHERE temp_mittel >= 15").fetchone()[0] == 0
+
+    # No internet: logged, tried again next run
+    def broken(*_):
+        raise OSError("offline")
+
+    assert await sync_weather(pg, settings, NOW + timedelta(days=3), broken) == 0
+    assert db.get_mark(pg, "wetter") == NOW + timedelta(days=1)
+
+
+def test_open_meteo_rows():
+    data = {"daily": {"time": ["2026-10-01", "2026-10-02"], "temperature_2m_mean": [9.4, None],
+                      "temperature_2m_min": [4.1, None], "temperature_2m_max": [14.0, None]}}
+    assert wetter.rows(data) == [(datetime(2026, 10, 1).date(), 9.4, 4.1, 14.0),
+                                 (datetime(2026, 10, 2).date(), None, None, None)]

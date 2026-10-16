@@ -13,6 +13,7 @@ TABLES = {
     "stats_hour": ("start", "meta_id", "90 days", "90 days"),
     "stats_5min": ("start", "meta_id", "7 days", "14 days"),
     "positions": ("time", "entity_id", "30 days", "30 days"),
+    "zustaende": ("time", "entity_id", "30 days", "30 days"),
 }
 
 SCHEMA = """
@@ -71,6 +72,40 @@ CREATE OR REPLACE VIEW aufenthalte AS
         min("time") AS beginn,
         lead(min("time")) OVER (PARTITION BY entity_id ORDER BY min("time")) AS ende
     FROM stays GROUP BY entity_id, state, nr;
+-- State changes of the entities matching STATE_ENTITIES; bis = how far each one has been fetched
+CREATE TABLE IF NOT EXISTS zustand_entitaeten (
+    entity_id text PRIMARY KEY,
+    name      text,
+    bis       timestamptz
+);
+CREATE TABLE IF NOT EXISTS zustaende (
+    entity_id text NOT NULL,
+    "time"    timestamptz NOT NULL,
+    state     text,
+    PRIMARY KEY (entity_id, "time")
+);
+-- One row per phase, from one state change to the next (ende is NULL for the current one)
+CREATE OR REPLACE VIEW zustand_phasen AS
+    SELECT z.entity_id, e.name, z.state, z."time" AS beginn,
+        lead(z."time") OVER (PARTITION BY z.entity_id ORDER BY z."time") AS ende
+    FROM zustaende z LEFT JOIN zustand_entitaeten e USING (entity_id);
+-- Daily temperature at home (Open-Meteo), for heating degree days
+CREATE TABLE IF NOT EXISTS wetter_tag (
+    tag         date PRIMARY KEY,
+    temp_mittel real,
+    temp_min    real,
+    temp_max    real
+);
+-- Gradtagzahl G20/15 (VDI 3807: 20 °C inside, heating below 15 °C outside) and Heizgradtage HGT15
+CREATE OR REPLACE VIEW gradtage AS
+    SELECT tag, temp_mittel,
+        CASE WHEN temp_mittel < 15 THEN 20 - temp_mittel ELSE 0 END AS gradtagzahl,
+        CASE WHEN temp_mittel < 15 THEN 15 - temp_mittel ELSE 0 END AS heizgradtage
+    FROM wetter_tag;
+CREATE TABLE IF NOT EXISTS sync_marken (
+    name text PRIMARY KEY,
+    zeit timestamptz NOT NULL
+);
 CREATE TABLE IF NOT EXISTS heim (
     id        integer PRIMARY KEY DEFAULT 1 CHECK (id = 1),
     latitude  double precision NOT NULL,
@@ -330,3 +365,75 @@ def log_sync(conn: psycopg.Connection, rows: int, seconds: float) -> None:
         (rows, seconds),
     )
     conn.commit()
+
+
+def state_marks(conn: psycopg.Connection, entities: dict[str, str | None]) -> dict[str, datetime | None]:
+    """Register the wanted entities (with their current name), return how far each one has been fetched."""
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO zustand_entitaeten (entity_id, name) VALUES (%s, %s)"
+            " ON CONFLICT (entity_id) DO UPDATE SET name = COALESCE(EXCLUDED.name, zustand_entitaeten.name)",
+            list(entities.items()),
+        )
+    rows = conn.execute(
+        "SELECT entity_id, bis FROM zustand_entitaeten WHERE entity_id = ANY(%s)", (list(entities),)
+    ).fetchall()
+    conn.commit()
+    return dict(rows)
+
+
+def insert_states(conn: psycopg.Connection, result: dict[str, list[dict]]) -> int:
+    """Rows in HA's minimal history format: s = state, lu = last changed (epoch s); a first row may carry lc."""
+    values = [
+        (entity_id, datetime.fromtimestamp(r.get("lc", r["lu"]), timezone.utc), r.get("s"))
+        for entity_id, rows in result.items()
+        for r in rows
+    ]
+    if not values:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(
+            'INSERT INTO zustaende (entity_id, "time", state) VALUES (%s, %s, %s)'
+            ' ON CONFLICT (entity_id, "time") DO UPDATE SET state = EXCLUDED.state',
+            values,
+        )
+    return len(values)
+
+
+def set_state_marks(conn: psycopg.Connection, entity_ids: list[str], bis: datetime) -> None:
+    conn.execute("UPDATE zustand_entitaeten SET bis = %s WHERE entity_id = ANY(%s)", (bis, entity_ids))
+
+
+def home(conn: psycopg.Connection) -> tuple[float, float] | None:
+    return conn.execute("SELECT latitude, longitude FROM heim WHERE id = 1").fetchone()
+
+
+def get_mark(conn: psycopg.Connection, name: str) -> datetime | None:
+    row = conn.execute("SELECT zeit FROM sync_marken WHERE name = %s", (name,)).fetchone()
+    return row[0] if row else None
+
+
+def set_mark(conn: psycopg.Connection, name: str, when: datetime) -> None:
+    conn.execute(
+        "INSERT INTO sync_marken (name, zeit) VALUES (%s, %s) ON CONFLICT (name) DO UPDATE SET zeit = EXCLUDED.zeit",
+        (name, when),
+    )
+
+
+def newest_weather_day(conn: psycopg.Connection):
+    return conn.execute("SELECT max(tag) FROM wetter_tag").fetchone()[0]
+
+
+def upsert_weather(conn: psycopg.Connection, rows) -> int:
+    """rows: (date, mean, min, max); days without a mean (not yet in the reanalysis) are skipped."""
+    values = [r for r in rows if r[1] is not None]
+    if not values:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO wetter_tag (tag, temp_mittel, temp_min, temp_max) VALUES (%s, %s, %s, %s)"
+            " ON CONFLICT (tag) DO UPDATE SET temp_mittel = EXCLUDED.temp_mittel,"
+            " temp_min = EXCLUDED.temp_min, temp_max = EXCLUDED.temp_max",
+            values,
+        )
+    return len(values)

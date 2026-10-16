@@ -92,3 +92,16 @@ class HAClient:
             # Otherwise HA adds a made-up row at start_time with the state of that moment
             include_start_time_state=False,
         ) or {}
+
+    async def state_changes(self, entity_ids: list[str], start: datetime, end: datetime) -> dict:
+        """Only state changes, no attributes: rows (s, lu), the first row of an entity also has a and lc."""
+        return await self.call(
+            "history/history_during_period",
+            entity_ids=entity_ids,
+            start_time=iso(start),
+            end_time=iso(end),
+            minimal_response=True,
+            no_attributes=True,
+            significant_changes_only=True,
+            include_start_time_state=False,
+        ) or {}

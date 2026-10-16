@@ -10,6 +10,8 @@ Because it pulls and does not get pushed to, the archive host may sleep. After a
 - Hourly values back to `HOURLY_SINCE`, 5-minute values from the first run on
 - TimescaleDB compression (falls back to plain tables on stock PostgreSQL)
 - Optional location history: positions and zones of the people you list, with a map of the route per day and the stays per place, as a self-hosted alternative to Google's timeline
+- Optional state history: every state change of the entities you pick (doors, lights, presence …), without attributes
+- Optional daily temperature at home from Open-Meteo, with heating degree days
 - Grafana with a read-only database login, a provisioned datasource and two starter dashboards
 
 ## Run
@@ -47,6 +49,9 @@ The first run fetches the full hourly history and takes a few minutes. After tha
 | `SHORT_TERM_DAYS` | `10` | HA's `purge_keep_days` |
 | `PROVISIONING_DIR` | — | where to write the Grafana provisioning (shared volume) |
 | `LOCATION_ENTITIES` | — | comma-separated `person.*` (or `device_tracker.*`) for the location history |
+| `STATE_ENTITIES` | — | comma-separated entity patterns whose state changes are archived, e.g. `binary_sensor.*,light.*,input_boolean.*` |
+| `STATE_EXCLUDE` | — | patterns left out of `STATE_ENTITIES`, e.g. `binary_sensor.*_update_available` |
+| `WEATHER_HISTORY` | `false` | `true`: daily mean/min/max temperature at `zone.home` from [Open-Meteo](https://open-meteo.com/en/docs/historical-weather-api), back to `HOURLY_SINCE` |
 
 ## Data
 
@@ -59,9 +64,18 @@ The first run fetches the full hourly history and takes a few minutes. After tha
 | view `aufenthalte` | one row per stay: `name`, `ort`, `beginn`, `ende` |
 | `heim`, `orte_namen` | home coordinates from HA's `zone.home`; nearest town per ~1 km square of the positions |
 | view `heute_vor` | "on this day": per person and earlier year the place furthest from home on today's and tomorrow's date (at least 50 km away) |
+| `zustaende` | one row per state change: `entity_id`, `time`, `state` |
+| `zustand_entitaeten` | the matching entities with their name, and how far each has been fetched |
+| view `zustand_phasen` | one row per phase: `entity_id`, `name`, `state`, `beginn`, `ende` |
+| `wetter_tag` | daily `temp_mittel`, `temp_min`, `temp_max` at home |
+| view `gradtage` | per day `gradtagzahl` (G20/15 after VDI 3807) and `heizgradtage` (HGT15) |
 | `sync_log` | one row per run |
 
-Positions come from HA's state history, which the recorder purges after 10 days, so the archive starts on the day the importer first runs. Use `person.*` rather than the phone's tracker: the history then survives a new phone.
+Positions and states come from HA's state history, which the recorder purges after 10 days, so the archive starts ten days before the importer first runs. Reading it adds no writes to HA's database: the recorder stores these states anyway. States are fetched without attributes and only on a change, each entity from where it stopped; an entity that starts matching later is fetched from the start of HA's window.
+
+The weather comes from Open-Meteo's reanalysis, once a day, with the home position rounded to 0.1° (about 10 km). It trails real time by a few days, so the last ten days are fetched again each time.
+
+Positions come from HA's state history too. Use `person.*` rather than the phone's tracker: the history then survives a new phone.
 
 ### Google timeline
 

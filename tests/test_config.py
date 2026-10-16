@@ -22,3 +22,12 @@ def test_from_env():
                            "LOCATION_ENTITIES": "person.a, person.b,"})
     assert cfg.hourly_since == JAN
     assert cfg.location_entities == ("person.a", "person.b")
+
+
+def test_state_and_weather_settings():
+    cfg = Config.from_env({"HA_TOKEN": "t", "STATE_ENTITIES": "binary_sensor.*, light.*",
+                           "STATE_EXCLUDE": "binary_sensor.*_update", "WEATHER_HISTORY": "True"})
+    assert cfg.state_entities == ("binary_sensor.*", "light.*")
+    assert cfg.state_exclude == ("binary_sensor.*_update",)
+    assert cfg.weather_history is True
+    assert Config.from_env({"HA_TOKEN": "t"}).weather_history is False

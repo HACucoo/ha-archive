@@ -17,6 +17,9 @@ class Config:
     short_days: int
     provisioning_dir: str | None
     location_entities: tuple[str, ...] = ()
+    state_entities: tuple[str, ...] = ()
+    state_exclude: tuple[str, ...] = ()
+    weather_history: bool = False
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
@@ -35,8 +38,17 @@ class Config:
             short_days=int(env.get("SHORT_TERM_DAYS", "10")),
             provisioning_dir=env.get("PROVISIONING_DIR") or None,
             # person.* (or device_tracker.*) whose positions and zones are archived
-            location_entities=tuple(e.strip() for e in env.get("LOCATION_ENTITIES", "").split(",") if e.strip()),
+            location_entities=split(env.get("LOCATION_ENTITIES", "")),
+            # Entity patterns (fnmatch, e.g. binary_sensor.*) whose state changes are archived
+            state_entities=split(env.get("STATE_ENTITIES", "")),
+            state_exclude=split(env.get("STATE_EXCLUDE", "")),
+            # Daily mean temperature at home from Open-Meteo, e.g. for heating degree days
+            weather_history=env.get("WEATHER_HISTORY", "").strip().lower() in ("1", "true", "yes", "on"),
         )
+
+
+def split(raw: str) -> tuple[str, ...]:
+    return tuple(e.strip() for e in raw.split(",") if e.strip())
 
 
 def parse_date(raw: str) -> datetime:

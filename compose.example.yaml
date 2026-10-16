@@ -29,6 +29,8 @@ services:
       HOURLY_SINCE: "2023-01-01"
       # People whose positions and zones are archived (HA itself keeps them 10 days only)
       LOCATION_ENTITIES: person.stephan,person.daniela,person.rosemarie
+      STATE_ENTITIES: binary_sensor.*,light.*,switch.*,input_boolean.*
+      WEATHER_HISTORY: "true"
       PROVISIONING_DIR: /provisioning
     volumes:
       - provisioning:/provisioning
