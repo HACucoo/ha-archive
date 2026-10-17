@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import db, sheets, wetter
+from . import db, jsonl, sheets, wetter
 from .geo import Places
 
 log = logging.getLogger(__name__)
@@ -51,6 +51,7 @@ async def sync_once(ha, conn, cfg, now: datetime | None = None, resync: bool = F
             update_places(conn)
         total += await sync_weather(conn, cfg, now)
     total += await sync_sheets(conn, cfg, now)
+    total += await sync_jsonl(conn, cfg, now)
     seconds = time.monotonic() - started
     db.log_sync(conn, total, seconds)
     log.info("synced %d rows for %d series in %.1f s", total, len(meta), seconds)
@@ -186,6 +187,27 @@ async def sync_sheets(conn, cfg, now: datetime, download=None) -> int:
             (folder / f"{now.astimezone():%Y-%m-%d_%H%M}.xlsx").write_bytes(data)
         count = db.replace_sheet(conn, name, tabs, fingerprint, now)
         log.info("sheet %s changed: %d rows in %d tabs", name, count, len(tabs))
+        total += count
+    return total
+
+
+async def sync_jsonl(conn, cfg, now: datetime, download=None) -> int:
+    """Each configured JSON Lines file: new lines are added, nothing is ever removed. Like a sheet link,
+    the URL stays out of the log."""
+    total = 0
+    for name, url in cfg.jsonl:
+        try:
+            rows = jsonl.read(await asyncio.to_thread(download or jsonl.download, url))
+        except Exception as err:  # noqa: BLE001 — host asleep or file not there yet: next run
+            log.warning("JSON Lines %s not fetched (%s%s)", name, type(err).__name__,
+                        f" {err.code}" if isinstance(getattr(err, "code", None), int) else "")
+            continue
+        fingerprint = jsonl.fingerprint(rows)
+        if fingerprint == db.jsonl_fingerprint(conn, name):
+            db.jsonl_checked(conn, name, now)
+            continue
+        count = db.upsert_jsonl(conn, name, rows, fingerprint, now)
+        log.info("JSON Lines %s changed: %d new of %d lines", name, count, len(rows))
         total += count
     return total
 

@@ -39,3 +39,9 @@ def test_sheet_settings():
     assert cfg.sheets == (("eins", "https://a"), ("zwei", "https://b"))
     assert cfg.sheets_dir == "/sheets"
     assert cfg.private_password == "p"
+
+
+def test_jsonl_settings():
+    cfg = Config.from_env({"HA_TOKEN": "t", "JSONL_TAGESKARTEN": " http://ha/local/a.jsonl ", "JSONL_LEER": ""})
+    assert cfg.jsonl == (("tageskarten", "http://ha/local/a.jsonl"),)
+    assert Config.from_env({"HA_TOKEN": "t"}).jsonl == ()

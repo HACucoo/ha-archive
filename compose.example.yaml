@@ -35,6 +35,8 @@ services:
       SHEET_PRIVAT: ${SHEET_PRIVAT}
       SHEETS_DIR: /sheets
       GRAFANA_PRIVATE_DB_PASSWORD: ${GRAFANA_PRIVATE_DB_PASSWORD}
+      # JSON Lines files, e.g. written by a script into HA's www folder (every line ever seen is kept)
+      # JSONL_TAGESKARTEN: http://192.168.2.139:8123/local/karten/tageskarten.jsonl
       PROVISIONING_DIR: /provisioning
     volumes:
       - provisioning:/provisioning

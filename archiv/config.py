@@ -24,6 +24,8 @@ class Config:
     sheets: tuple[tuple[str, str], ...] = ()
     sheets_dir: str | None = None
     private_password: str | None = None
+    # name -> URL of a JSON Lines file, from JSONL_<NAME>
+    jsonl: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_env(cls, env=os.environ) -> "Config":
@@ -54,6 +56,8 @@ class Config:
             sheets_dir=env.get("SHEETS_DIR") or None,
             # Login for the private schema (sheets), for a second Grafana organisation
             private_password=env.get("GRAFANA_PRIVATE_DB_PASSWORD") or None,
+            jsonl=tuple(sorted((k[len("JSONL_"):].lower(), v.strip()) for k, v in env.items()
+                               if k.startswith("JSONL_") and v.strip())),
         )
 
 

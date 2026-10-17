@@ -119,6 +119,21 @@ CREATE TABLE IF NOT EXISTS privat.sheet_zeilen (
     daten  jsonb NOT NULL,
     PRIMARY KEY (quelle, blatt, zeile)
 );
+-- JSON Lines files (JSONL_<NAME>): every line ever seen, by content; readable by grafana_ro
+CREATE TABLE IF NOT EXISTS jsonl_quellen (
+    quelle      text PRIMARY KEY,
+    fingerprint text,
+    geaendert   timestamptz,
+    abgerufen   timestamptz
+);
+CREATE TABLE IF NOT EXISTS jsonl_zeilen (
+    quelle   text NOT NULL,
+    hash     text NOT NULL,
+    daten    jsonb NOT NULL,
+    erstmals timestamptz NOT NULL,
+    zuletzt  timestamptz NOT NULL,
+    PRIMARY KEY (quelle, hash)
+);
 -- How far each statistic has been fetched per table, so series without new rows are not asked from the start again
 CREATE TABLE IF NOT EXISTS stat_marken (
     meta_id integer NOT NULL REFERENCES meta(id),
@@ -591,4 +606,36 @@ def replace_sheet(conn: psycopg.Connection, quelle: str, tabs: dict, fingerprint
 
 def sheet_checked(conn: psycopg.Connection, quelle: str, now: datetime) -> None:
     conn.execute("UPDATE privat.sheet_quellen SET abgerufen = %s WHERE quelle = %s", (now, quelle))
+    conn.commit()
+
+
+def jsonl_fingerprint(conn: psycopg.Connection, quelle: str) -> str | None:
+    row = conn.execute("SELECT fingerprint FROM jsonl_quellen WHERE quelle = %s", (quelle,)).fetchone()
+    return row[0] if row else None
+
+
+def upsert_jsonl(conn: psycopg.Connection, quelle: str, rows: list[tuple[str, dict]], fingerprint: str,
+                 now: datetime) -> int:
+    """Add the lines not seen before, mark the others as still in the file; returns how many are new.
+    Lines gone from the file stay (zuletzt tells when they were last there)."""
+    before = conn.execute("SELECT count(*) FROM jsonl_zeilen WHERE quelle = %s", (quelle,)).fetchone()[0]
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO jsonl_zeilen (quelle, hash, daten, erstmals, zuletzt) VALUES (%s, %s, %s, %s, %s)"
+            " ON CONFLICT (quelle, hash) DO UPDATE SET zuletzt = EXCLUDED.zuletzt",
+            [(quelle, key, json.dumps(value, ensure_ascii=False), now, now) for key, value in rows],
+        )
+    after = conn.execute("SELECT count(*) FROM jsonl_zeilen WHERE quelle = %s", (quelle,)).fetchone()[0]
+    conn.execute(
+        "INSERT INTO jsonl_quellen (quelle, fingerprint, geaendert, abgerufen) VALUES (%s, %s, %s, %s)"
+        " ON CONFLICT (quelle) DO UPDATE SET fingerprint = EXCLUDED.fingerprint,"
+        " geaendert = EXCLUDED.geaendert, abgerufen = EXCLUDED.abgerufen",
+        (quelle, fingerprint, now, now),
+    )
+    conn.commit()
+    return after - before
+
+
+def jsonl_checked(conn: psycopg.Connection, quelle: str, now: datetime) -> None:
+    conn.execute("UPDATE jsonl_quellen SET abgerufen = %s WHERE quelle = %s", (now, quelle))
     conn.commit()

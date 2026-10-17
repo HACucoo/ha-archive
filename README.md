@@ -13,6 +13,7 @@ Because it pulls and does not get pushed to, the archive host may sleep. After a
 - Optional state history: every state change of the entities you pick (doors, lights, presence …), without attributes
 - Optional daily temperature at home from Open-Meteo, with heating degree days
 - Optional Google Sheets: each version kept as an .xlsx file, the rows in a private schema that the shared Grafana login cannot read
+- Optional JSON Lines files over HTTP (e.g. written by a script into HA's `www` folder): every line ever seen is kept
 - Grafana with a read-only database login, a provisioned datasource and two starter dashboards
 
 ## Run
@@ -55,6 +56,7 @@ The first run fetches the full hourly history and takes a few minutes. After tha
 | `SHEET_<NAME>` | — | link of a Google Sheet shared as "anyone with the link can view"; one variable per sheet, `<NAME>` becomes its name |
 | `SHEETS_DIR` | — | folder (a volume) for the .xlsx versions |
 | `GRAFANA_PRIVATE_DB_PASSWORD` | — | creates/updates the role `grafana_privat`, which reads the private schema only |
+| `JSONL_<NAME>` | — | URL of a JSON Lines file (one JSON object per line); one variable per file, `<NAME>` becomes its name |
 | `WEATHER_HISTORY` | `false` | `true`: daily mean/min/max temperature at `zone.home` from [Open-Meteo](https://open-meteo.com/en/docs/historical-weather-api), back to `HOURLY_SINCE` |
 
 ## Data
@@ -75,13 +77,13 @@ The first run fetches the full hourly history and takes a few minutes. After tha
 | view `gradtage` | per day `gradtagzahl` (G20/15 after VDI 3807) and `heizgradtage` (HGT15) |
 | `privat.sheet_zeilen` | one row per sheet row: `quelle` (sheet name), `blatt` (tab), `zeile` (row number), `daten` (jsonb, column header → value) |
 | `privat.sheet_quellen` | per sheet: fingerprint of the values, when they last changed, when last fetched |
+| `jsonl_zeilen` | one row per distinct line ever seen: `quelle` (name), `hash` (of the content), `daten` (jsonb), `erstmals`, `zuletzt` (last run that still found it in the file) |
+| `jsonl_quellen` | per file: fingerprint of its lines, when they last changed, when last fetched |
 | `sync_log` | one row per run |
 
 Positions and states come from HA's state history, which the recorder purges after 10 days, so the archive starts ten days before the importer first runs. Reading it adds no writes to HA's database: the recorder stores these states anyway. States are fetched without attributes and only on a change, each entity from where it stopped (a row that only repeats the state before it, as HA writes for every entity when it restarts, is left out); an entity that starts matching later is fetched from the start of HA's window.
 
 The weather comes from Open-Meteo's reanalysis, once a day, with the home position rounded to 0.1° (about 10 km). It trails real time by a few days, so the last ten days are fetched again each time.
-
-Positions come from HA's state history too.
 
 ### Google Sheets
 
@@ -92,7 +94,27 @@ Anonymous Grafana viewers can query every datasource of their organisation, not 
 ```sql
 SELECT (daten->>'Datum')::date AS tag, daten->>'Beschreibung' AS text
 FROM privat.sheet_zeilen WHERE quelle = 'name' AND blatt = 'Tab' ORDER BY zeile;
-``` Use `person.*` rather than the phone's tracker: the history then survives a new phone.
+```
+
+### JSON Lines files
+
+For data that never reaches HA's recorder as numbers, such as menus, lists or logs a script appends to. Write the file into HA's `config/www/` folder and it is served at `http://<ha>/local/…` without a login; set `JSONL_<NAME>` to that URL. Every run downloads it. A line is stored once, identified by its content (key order and spacing do not matter); lines that disappear from the file stay in the archive, so the file may be rotated or rewritten. Broken lines (a write cut short) and lines that are not a JSON object are skipped. The URL is not written to the log.
+
+The rows land in the public schema, which the shared Grafana login reads: use it for data anyone on the LAN may see (and anything under `/local/` can be fetched without a login anyway).
+
+```sql
+-- One line per day (the newest version if the file was corrected), then one row per dish
+WITH tage AS (
+    SELECT DISTINCT ON (daten->>'datum') daten FROM jsonl_zeilen
+    WHERE quelle = 'tageskarten' ORDER BY daten->>'datum', zuletzt DESC, erstmals DESC
+)
+SELECT (daten->>'datum')::date AS tag, g->>'name' AS gericht
+FROM tage, jsonb_array_elements(daten->'gerichte') g ORDER BY 1;
+```
+
+### Location history
+
+Use `person.*` rather than the phone's tracker: the history then survives a new phone.
 
 ### Google timeline
 

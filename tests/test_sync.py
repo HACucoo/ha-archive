@@ -6,7 +6,7 @@ import pytest
 from archiv import db, wetter
 from archiv.config import Config
 from archiv.ha import HAClient
-from archiv.sync import sync_once, sync_sheets, sync_weather, wanted_entities
+from archiv.sync import sync_jsonl, sync_once, sync_sheets, sync_weather, wanted_entities
 
 NOW = datetime(2026, 10, 10, 20, tzinfo=timezone.utc)
 
@@ -276,6 +276,42 @@ async def test_sheets(pg, tmp_path):
 
     assert await sync_sheets(pg, settings, NOW + timedelta(hours=3), broken) == 0
     assert pg.execute("SELECT count(*) FROM privat.sheet_zeilen").fetchone()[0] == 1
+
+
+async def test_jsonl(pg, caplog):
+    db.setup(pg, ro_password="ro")
+    url = "http://ha:8123/local/karten/tageskarten.jsonl"
+    settings = cfg(jsonl=(("tageskarten", url),))
+    file = {"data": b'{"datum": "2026-10-16", "preis": "12,50"}\n{"datum": "2026-10-17", "preis": "13,50"}\n'}
+
+    def download(link):
+        assert link == url
+        return file["data"]
+
+    assert await sync_jsonl(pg, settings, NOW, download) == 2
+    # Unchanged: nothing new, only the check time moves on
+    assert await sync_jsonl(pg, settings, NOW + timedelta(hours=1), download) == 0
+    assert pg.execute("SELECT geaendert, abgerufen FROM jsonl_quellen").fetchone() == (NOW, NOW + timedelta(hours=1))
+
+    # The file loses its first line and gains one: the old line stays in the archive
+    file["data"] = b'{"datum": "2026-10-17", "preis": "13,50"}\n{"datum": "2026-10-18", "preis": "9,80"}\n'
+    assert await sync_jsonl(pg, settings, NOW + timedelta(hours=2), download) == 1
+    rows = pg.execute("SELECT daten->>'datum', erstmals, zuletzt FROM jsonl_zeilen ORDER BY 1").fetchall()
+    assert rows == [("2026-10-16", NOW, NOW), ("2026-10-17", NOW, NOW + timedelta(hours=2)),
+                    ("2026-10-18", NOW + timedelta(hours=2), NOW + timedelta(hours=2))]
+
+    # Not reachable: the archive stays, the URL is not logged
+    def broken(link):
+        raise OSError(f"cannot reach {link}")
+
+    assert await sync_jsonl(pg, settings, NOW + timedelta(hours=3), broken) == 0
+    assert pg.execute("SELECT count(*) FROM jsonl_zeilen").fetchone()[0] == 3
+    assert "tageskarten" in caplog.text and url not in caplog.text
+
+    # Grafana's login reads it
+    pg.execute("SET ROLE grafana_ro")
+    assert pg.execute("SELECT count(*) FROM jsonl_zeilen").fetchone()[0] == 3
+    pg.rollback()
 
 
 def test_private_schema_is_private(pg):
