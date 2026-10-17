@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta, timezone
 
 import psycopg
@@ -27,6 +28,31 @@ def hourly(start, count, value=1.0, total=None):
 def test_to_datetime():
     assert db.to_datetime(1791655200000) == datetime(2026, 10, 10, 18, tzinfo=timezone.utc)
     assert db.to_datetime("2026-10-10T18:00:00+00:00") == datetime(2026, 10, 10, 18, tzinfo=timezone.utc)
+
+
+def test_update_timescale(pg, monkeypatch, caplog):
+    if not db.setup(pg):
+        pytest.skip("no TimescaleDB")
+    pg.commit()
+    dsn = psycopg.conninfo.make_conninfo(os.environ.get("PG_TEST_DSN") or pg.info.dsn, dbname="archiv_test")
+    # Same version as the image: nothing to do, nothing logged
+    db.update_timescale(dsn)
+    assert "TimescaleDB" not in caplog.text
+
+    # An older installed version: the ALTER runs in a session of its own and goes through
+    real = db._extversions
+    calls = []
+
+    def older_first(conn):
+        calls.append(1)
+        installed, available = real(conn)
+        return ("0.0.1", available) if len(calls) == 1 else (installed, available)
+
+    monkeypatch.setattr(db, "_extversions", older_first)
+    with caplog.at_level("INFO", logger="archiv.db"):
+        db.update_timescale(dsn)
+    assert "not updated" not in caplog.text
+    assert "updated from 0.0.1 to" in caplog.text
 
 
 def test_setup_twice(pg):

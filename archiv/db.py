@@ -193,24 +193,31 @@ def connect(dsn: str) -> psycopg.Connection:
 
 
 def update_timescale(dsn: str) -> None:
-    """Bring the TimescaleDB extension up to the version of the running image. It has to be the first
-    statement of a session, hence its own connection; without the extension nothing happens."""
+    """Bring the TimescaleDB extension up to the version of the running image. Any statement loads the
+    installed version into the session, after which it cannot be updated there: the ALTER gets a connection
+    of its own and is its first statement; the versions are read in other connections. Without the extension,
+    or with the image's version already installed, nothing happens."""
     try:
         with psycopg.connect(dsn, autocommit=True) as conn:
-            before = _extversion(conn)
-            if before is None:
-                return
+            before, available = _extversions(conn)
+        if before is None or before == available:
+            return
+        with psycopg.connect(dsn, autocommit=True) as conn:
             conn.execute("ALTER EXTENSION timescaledb UPDATE")
-            after = _extversion(conn)
-            if after != before:
-                log.info("TimescaleDB extension updated from %s to %s", before, after)
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            after, _ = _extversions(conn)
+        log.info("TimescaleDB extension updated from %s to %s", before, after)
     except psycopg.Error as err:
         log.warning("TimescaleDB extension not updated: %s", err.diag.message_primary or err)
 
 
-def _extversion(conn) -> str | None:
-    row = conn.execute("SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'").fetchone()
-    return row[0] if row else None
+def _extversions(conn) -> tuple[str | None, str | None]:
+    """(installed version, version the running image ships); (None, None) without the extension."""
+    row = conn.execute(
+        "SELECT e.extversion, a.default_version FROM pg_extension e"
+        " JOIN pg_available_extensions a ON a.name = e.extname WHERE e.extname = 'timescaledb'"
+    ).fetchone()
+    return (row[0], row[1]) if row else (None, None)
 
 
 def statements(script: str) -> list[str]:
