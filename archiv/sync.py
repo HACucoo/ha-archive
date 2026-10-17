@@ -12,12 +12,14 @@ from .geo import Places
 
 log = logging.getLogger(__name__)
 
-# (HA period, table, how much to request per call, how far each run goes back behind the last fetch)
-# HA compiles an hour's statistics some minutes after it ended; the overlap catches late ones, the upsert the doubles
+# (HA period, table, how much to request per call)
 PERIODS = [
-    ("hour", "stats_hour", timedelta(days=120), timedelta(hours=3)),
-    ("5minute", "stats_5min", timedelta(days=2), timedelta(minutes=30)),
+    ("hour", "stats_hour", timedelta(days=120)),
+    ("5minute", "stats_5min", timedelta(days=2)),
 ]
+# A series without new rows goes back this far behind its last fetch, for statistics HA compiles late
+# (after a restart or a busy recorder); the upsert drops the doubles
+LATE = timedelta(days=1)
 # Series per request: many for the hourly catch-up, few while a long backfill brings thousands of rows each
 BATCH_SHORT = 200
 BATCH_LONG = 10
@@ -38,8 +40,8 @@ async def sync_once(ha, conn, cfg, now: datetime | None = None, resync: bool = F
     now = now or datetime.now(timezone.utc)
     meta = await in_thread(db.upsert_meta, conn, await ha.statistic_ids())
     total = 0
-    for period, table, chunk, overlap in PERIODS:
-        total += await sync_statistics(ha, conn, cfg, meta, period, table, chunk, overlap, now, resync)
+    for period, table, chunk in PERIODS:
+        total += await sync_statistics(ha, conn, cfg, meta, period, table, chunk, now, resync)
     total += await sync_positions(ha, conn, cfg, now, resync)
     if cfg.location_entities or cfg.state_entities or cfg.weather_history:
         states = await ha.states()
@@ -55,20 +57,19 @@ async def sync_once(ha, conn, cfg, now: datetime | None = None, resync: bool = F
     return total
 
 
-async def sync_statistics(ha, conn, cfg, meta, period, table, chunk, overlap, now, resync) -> int:
-    """Series that stopped at the same point are asked together. Each series remembers how far it was fetched
-    (stat_marken), so one without new rows is not asked from HOURLY_SINCE again on every run."""
+async def sync_statistics(ha, conn, cfg, meta, period, table, chunk, now, resync) -> int:
+    """Each series goes on from its newest stored row (fetched again, the upsert keeps it current); series
+    standing at the same row are asked together. A series without new rows remembers how far it was fetched
+    (stat_marken) and goes back only a day behind that, not to HOURLY_SINCE on every run."""
     # HA only keeps 5-minute rows for the recorder's purge window, nothing older to fetch
     floor = cfg.hourly_since if period == "hour" else now - timedelta(days=cfg.short_days)
     fetched = {} if resync else await in_thread(db.stat_marks, conn, table)
-    # Before 0.7.0 there were no marks: the newest stored row says where to go on
     stored = {} if resync else await in_thread(db.watermarks, conn, table)
     groups: dict[datetime, list[tuple[str, int]]] = {}
     for statistic_id, meta_id in meta.items():
+        cursor = stored.get(meta_id, floor)
         if meta_id in fetched:
-            cursor = fetched[meta_id] - overlap
-        else:
-            cursor = stored.get(meta_id, floor)
+            cursor = max(cursor, fetched[meta_id] - LATE)
         groups.setdefault(max(cursor, floor), []).append((statistic_id, meta_id))
     total = 0
     for cursor, series in sorted(groups.items()):

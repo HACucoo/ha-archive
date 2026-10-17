@@ -79,16 +79,19 @@ async def test_sync_catches_up(pg, fake_ha):
     assert pg.execute("SELECT count(*) FROM stats_hour").fetchone()[0] == 24 * 39 * 2
     assert pg.execute("SELECT count(*) FROM sync_log").fetchone()[0] == 1
 
-    # Next pass: all series together, from a little before where the last one stopped, not from HOURLY_SINCE
+    # Next pass: series at the same newest row together (a row HA compiled late is still caught); the empty
+    # one only a day behind its last fetch, not from HOURLY_SINCE again
     fake_ha.requests.clear()
     later = NOW + timedelta(hours=1)
     fake_ha.rows[("sensor.t", "hour")] += hourly(since + timedelta(hours=24 * 39), 1)
     async with HAClient(fake_ha.url, "good") as ha:
         await sync_once(ha, pg, cfg(), now=later)
-    hour_requests = [r for r in fake_ha.requests if r.get("period") == "hour"]
-    assert len(hour_requests) == 1
-    assert set(hour_requests[0]["statistic_ids"]) == {"sensor.t", "sensor.e", "sensor.leer"}
-    assert hour_requests[0]["start_time"] == (NOW - timedelta(hours=3)).isoformat()
+    hour_requests = sorted((r["start_time"], sorted(r["statistic_ids"]))
+                           for r in fake_ha.requests if r.get("period") == "hour")
+    assert hour_requests == [
+        ((NOW - timedelta(days=1)).isoformat(), ["sensor.leer"]),
+        ((since + timedelta(hours=24 * 39 - 1)).isoformat(), ["sensor.e", "sensor.t"]),
+    ]
     assert pg.execute("SELECT count(*) FROM stats_hour").fetchone()[0] == 24 * 39 * 2 + 1
 
     # --resync goes back to the start
