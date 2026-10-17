@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -39,6 +40,7 @@ async def run(cfg: Config, once: bool, resync: bool) -> None:
         try:
             with db.connect(cfg.pg_dsn) as conn:
                 if not ready:
+                    db.update_timescale(cfg.pg_dsn)
                     timescale = db.setup(conn, cfg.ro_password, cfg.private_password)
                     log.info("database ready (TimescaleDB: %s)", "yes" if timescale else "no")
                     ready = True
@@ -82,14 +84,23 @@ def main() -> None:
     parser.add_argument("--entity", help="person.* the Google export belongs to")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    cfg = Config.from_env()
     if args.import_google:
         if not args.entity:
             parser.error("--import-google needs --entity, e.g. --entity person.stephan")
-        asyncio.run(import_google(cfg, args.import_google, args.entity))
+        asyncio.run(import_google(Config.from_env(), args.import_google, args.entity))
         return
-    install_provisioning(cfg.provisioning_dir)
+    # Grafana waits for this; a broken setting below must not keep it from starting
+    install_provisioning(os.environ.get("PROVISIONING_DIR") or None)
     HEALTH_FILE.touch()
+    try:
+        cfg = Config.from_env()
+    except SystemExit as err:
+        if args.once:
+            raise
+        # Stay up (a restart loop would not fix the setting) until the stack is started with it
+        log.error("%s – nothing is fetched until that is fixed and the importer restarted", err)
+        while True:
+            time.sleep(3600)
     asyncio.run(run(cfg, args.once, args.resync))
 
 

@@ -12,11 +12,15 @@ from .geo import Places
 
 log = logging.getLogger(__name__)
 
-# (HA period, table, how much to request per call)
+# (HA period, table, how much to request per call, how far each run goes back behind the last fetch)
+# HA compiles an hour's statistics some minutes after it ended; the overlap catches late ones, the upsert the doubles
 PERIODS = [
-    ("hour", "stats_hour", timedelta(days=120)),
-    ("5minute", "stats_5min", timedelta(days=2)),
+    ("hour", "stats_hour", timedelta(days=120), timedelta(hours=3)),
+    ("5minute", "stats_5min", timedelta(days=2), timedelta(minutes=30)),
 ]
+# Series per request: many for the hourly catch-up, few while a long backfill brings thousands of rows each
+BATCH_SHORT = 200
+BATCH_LONG = 10
 # HA commits states a few seconds late; each state fetch goes back a little, the upsert drops the doubles
 STATE_OVERLAP = timedelta(minutes=10)
 # Open-Meteo's reanalysis trails by a few days: fetch once a day, the last ten days again each time
@@ -24,24 +28,18 @@ WEATHER_EVERY = timedelta(hours=20)
 WEATHER_REFRESH_DAYS = 10
 
 
+def in_thread(fn, *args):
+    """Database work off the event loop, so the HA WebSocket keeps answering its pings meanwhile."""
+    return asyncio.to_thread(fn, *args)
+
+
 async def sync_once(ha, conn, cfg, now: datetime | None = None, resync: bool = False) -> int:
     started = time.monotonic()
     now = now or datetime.now(timezone.utc)
-    meta = db.upsert_meta(conn, await ha.statistic_ids())
+    meta = await in_thread(db.upsert_meta, conn, await ha.statistic_ids())
     total = 0
-    for period, table, chunk in PERIODS:
-        # HA only keeps 5-minute rows for the recorder's purge window, nothing older to fetch
-        floor = cfg.hourly_since if period == "hour" else now - timedelta(days=cfg.short_days)
-        marks = {} if resync else db.watermarks(conn, table)
-        for statistic_id, meta_id in meta.items():
-            # The newest stored row is fetched again; an upsert keeps it current
-            cursor = max(marks.get(meta_id, floor), floor)
-            while cursor < now:
-                end = min(cursor + chunk, now)
-                result = await ha.statistics([statistic_id], cursor, end, period)
-                total += db.insert_rows(conn, table, meta_id, result.get(statistic_id, []))
-                cursor = end
-            conn.commit()
+    for period, table, chunk, overlap in PERIODS:
+        total += await sync_statistics(ha, conn, cfg, meta, period, table, chunk, overlap, now, resync)
     total += await sync_positions(ha, conn, cfg, now, resync)
     if cfg.location_entities or cfg.state_entities or cfg.weather_history:
         states = await ha.states()
@@ -57,6 +55,39 @@ async def sync_once(ha, conn, cfg, now: datetime | None = None, resync: bool = F
     return total
 
 
+async def sync_statistics(ha, conn, cfg, meta, period, table, chunk, overlap, now, resync) -> int:
+    """Series that stopped at the same point are asked together. Each series remembers how far it was fetched
+    (stat_marken), so one without new rows is not asked from HOURLY_SINCE again on every run."""
+    # HA only keeps 5-minute rows for the recorder's purge window, nothing older to fetch
+    floor = cfg.hourly_since if period == "hour" else now - timedelta(days=cfg.short_days)
+    fetched = {} if resync else await in_thread(db.stat_marks, conn, table)
+    # Before 0.7.0 there were no marks: the newest stored row says where to go on
+    stored = {} if resync else await in_thread(db.watermarks, conn, table)
+    groups: dict[datetime, list[tuple[str, int]]] = {}
+    for statistic_id, meta_id in meta.items():
+        if meta_id in fetched:
+            cursor = fetched[meta_id] - overlap
+        else:
+            cursor = stored.get(meta_id, floor)
+        groups.setdefault(max(cursor, floor), []).append((statistic_id, meta_id))
+    total = 0
+    for cursor, series in sorted(groups.items()):
+        size = BATCH_SHORT if now - cursor <= chunk else BATCH_LONG
+        for i in range(0, len(series), size):
+            batch = dict(series[i:i + size])
+            start = cursor
+            while start < now:
+                end = min(start + chunk, now)
+                result = await ha.statistics(list(batch), start, end, period)
+                for statistic_id, rows in result.items():
+                    if statistic_id in batch:
+                        total += await in_thread(db.insert_rows, conn, table, batch[statistic_id], rows)
+                start = end
+            await in_thread(db.set_stat_marks, conn, table, list(batch.values()), now)
+            await in_thread(conn.commit)
+    return total
+
+
 async def sync_positions(ha, conn, cfg, now: datetime, resync: bool) -> int:
     """Positions and zones of the configured people; HA keeps them for the recorder's purge window only."""
     floor = now - timedelta(days=cfg.short_days)
@@ -67,9 +98,9 @@ async def sync_positions(ha, conn, cfg, now: datetime, resync: bool) -> int:
         while cursor < now:
             end = min(cursor + timedelta(days=1), now)
             result = await ha.history([entity_id], cursor, end)
-            total += db.insert_positions(conn, entity_id, result.get(entity_id, []))
+            total += await in_thread(db.insert_positions, conn, entity_id, result.get(entity_id, []))
             cursor = end
-        conn.commit()
+        await in_thread(conn.commit)
     return total
 
 
@@ -93,7 +124,7 @@ async def sync_states(ha, conn, cfg, states: list[dict], now: datetime, resync: 
     if not wanted:
         return 0
     floor = now - timedelta(days=cfg.short_days)
-    marks = db.state_marks(conn, wanted)
+    marks = await in_thread(db.state_marks, conn, wanted)
     groups: dict[datetime, list[str]] = {}
     for entity_id in wanted:
         mark = None if resync else marks.get(entity_id)
@@ -103,10 +134,10 @@ async def sync_states(ha, conn, cfg, states: list[dict], now: datetime, resync: 
         cursor = max(cursor - STATE_OVERLAP, floor)
         while cursor < now:
             end = min(cursor + timedelta(days=1), now)
-            total += db.insert_states(conn, await ha.state_changes(entity_ids, cursor, end))
+            total += await in_thread(db.insert_states, conn, await ha.state_changes(entity_ids, cursor, end))
             cursor = end
-        db.set_state_marks(conn, entity_ids, now)
-        conn.commit()
+        await in_thread(db.set_state_marks, conn, entity_ids, now)
+        await in_thread(conn.commit)
     return total
 
 
@@ -140,7 +171,9 @@ async def sync_sheets(conn, cfg, now: datetime, download=None) -> int:
             data = await asyncio.to_thread(download or sheets.download, url)
             tabs = sheets.read(data)
         except Exception as err:  # noqa: BLE001 — keep the last version, try again next run
-            log.warning("sheet %s not fetched, keeping the last version: %s", name, err)
+            # Only the kind of error: the message of a malformed link would contain the link itself
+            log.warning("sheet %s not fetched (%s%s), keeping the last version", name, type(err).__name__,
+                        f" {err.code}" if isinstance(getattr(err, "code", None), int) else "")
             continue
         fingerprint = sheets.fingerprint(tabs)
         if fingerprint == db.sheet_fingerprint(conn, name):

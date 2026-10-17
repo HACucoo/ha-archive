@@ -35,13 +35,18 @@ class HAClient:
 
     async def __aenter__(self):
         self.ws = await websockets.connect(self.url, max_size=None, open_timeout=20)
-        hello = json.loads(await self._recv())
-        if hello.get("type") != "auth_required":
-            raise HAError(f"unexpected greeting: {hello.get('type')}")
-        await self.ws.send(json.dumps({"type": "auth", "access_token": self.token}))
-        answer = json.loads(await self._recv())
-        if answer.get("type") != "auth_ok":
-            raise HAError(f"authentication failed: {answer.get('message', answer.get('type'))}")
+        try:
+            hello = json.loads(await self._recv())
+            if hello.get("type") != "auth_required":
+                raise HAError(f"unexpected greeting: {hello.get('type')}")
+            await self.ws.send(json.dumps({"type": "auth", "access_token": self.token}))
+            answer = json.loads(await self._recv())
+            if answer.get("type") != "auth_ok":
+                raise HAError(f"authentication failed: {answer.get('message', answer.get('type'))}")
+        except BaseException:
+            # __aexit__ does not run when __aenter__ fails: without this every failed attempt leaves a socket open
+            await self.ws.close()
+            raise
         return self
 
     async def __aexit__(self, *exc):

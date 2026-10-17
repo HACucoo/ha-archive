@@ -77,7 +77,7 @@ The first run fetches the full hourly history and takes a few minutes. After tha
 | `privat.sheet_quellen` | per sheet: fingerprint of the values, when they last changed, when last fetched |
 | `sync_log` | one row per run |
 
-Positions and states come from HA's state history, which the recorder purges after 10 days, so the archive starts ten days before the importer first runs. Reading it adds no writes to HA's database: the recorder stores these states anyway. States are fetched without attributes and only on a change, each entity from where it stopped; an entity that starts matching later is fetched from the start of HA's window.
+Positions and states come from HA's state history, which the recorder purges after 10 days, so the archive starts ten days before the importer first runs. Reading it adds no writes to HA's database: the recorder stores these states anyway. States are fetched without attributes and only on a change, each entity from where it stopped (a row that only repeats the state before it, as HA writes for every entity when it restarts, is left out); an entity that starts matching later is fetched from the start of HA's window.
 
 The weather comes from Open-Meteo's reanalysis, once a day, with the home position rounded to 0.1° (about 10 km). It trails real time by a few days, so the last ten days are fetched again each time.
 
@@ -114,7 +114,11 @@ docker exec ha-archive-importer-1 python -m archiv --once --resync
 
 ## Backup
 
-Copying the database folder of a running PostgreSQL does not give a backup you can rely on. The `backup` service in the compose file writes a dump instead, `archiv.dump`, renewed when it is older than 20 hours. Back up that file. To restore into an empty database:
+Copying the database folder of a running PostgreSQL does not give a backup you can rely on. The `backup` service in the compose file writes a dump instead, `archiv.dump`, renewed when it is older than six hours (checked every ten minutes while the host is awake), and next to it `archiv.timescaledb-version`. Back up both files.
+
+A dump only restores into the TimescaleDB version it was made with. That is why the compose file pins the image (`timescale/timescaledb:2.30.2-pg17`) instead of following `latest`. To update, change the tag of `db` and `backup` together; at its next start the importer runs `ALTER EXTENSION timescaledb UPDATE`, so the database follows the new image. For a restore, start `db` with the version from `archiv.timescaledb-version` first.
+
+To restore into an empty database:
 
 ```bash
 docker exec -i ha-archive-db-1 psql -U archiv -d archiv -c "SELECT timescaledb_pre_restore();"

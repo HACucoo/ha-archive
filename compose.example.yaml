@@ -1,6 +1,6 @@
 services:
   db:
-    image: timescale/timescaledb:latest-pg17
+    image: timescale/timescaledb:2.30.2-pg17
     restart: unless-stopped
     environment:
       POSTGRES_USER: archiv
@@ -44,7 +44,7 @@ services:
 
   # Daily dump of the archive: a consistent backup, unlike copying the database files while it runs
   backup:
-    image: timescale/timescaledb:latest-pg17
+    image: timescale/timescaledb:2.30.2-pg17
     restart: unless-stopped
     depends_on:
       db:
@@ -55,11 +55,12 @@ services:
       - /bin/sh
       - -c
       - |
+        # Fresh every six hours while the host is awake; a restore needs the TimescaleDB version noted beside it
         while true; do
-          if [ -z "$$(find /dump -name archiv.dump -mmin -1200)" ]; then
-            pg_dump -h db -U archiv -Fc archiv > /dump/archiv.dump.tmp && mv /dump/archiv.dump.tmp /dump/archiv.dump && echo "dump $$(date)"
+          if [ -z "$$(find /dump -name archiv.dump -mmin -360)" ]; then
+            pg_dump -h db -U archiv -Fc archiv > /dump/archiv.dump.tmp && mv /dump/archiv.dump.tmp /dump/archiv.dump               && psql -h db -U archiv -d archiv -tAc "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'"                  > /dump/archiv.timescaledb-version               && echo "dump $$(date), TimescaleDB $$(cat /dump/archiv.timescaledb-version)"
           fi
-          sleep 3600
+          sleep 600
         done
     volumes:
       - /mnt/docker-data/ha-archiv/dump:/dump

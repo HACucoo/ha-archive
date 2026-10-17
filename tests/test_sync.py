@@ -63,6 +63,8 @@ async def test_sync_catches_up(pg, fake_ha):
     fake_ha.statistic_ids = [
         {"statistic_id": "sensor.t", "mean_type": 1, "has_sum": False},
         {"statistic_id": "sensor.e", "mean_type": 0, "has_sum": True},
+        # Never has a row: must not be asked from HOURLY_SINCE on every run
+        {"statistic_id": "sensor.leer", "mean_type": 1, "has_sum": False},
     ]
     since = datetime(2026, 9, 1, tzinfo=timezone.utc)
     fake_ha.rows[("sensor.t", "hour")] = hourly(since, 24 * 39)
@@ -77,14 +79,16 @@ async def test_sync_catches_up(pg, fake_ha):
     assert pg.execute("SELECT count(*) FROM stats_hour").fetchone()[0] == 24 * 39 * 2
     assert pg.execute("SELECT count(*) FROM sync_log").fetchone()[0] == 1
 
-    # Next pass starts at each series' newest row, not at HOURLY_SINCE again
+    # Next pass: all series together, from a little before where the last one stopped, not from HOURLY_SINCE
     fake_ha.requests.clear()
     later = NOW + timedelta(hours=1)
     fake_ha.rows[("sensor.t", "hour")] += hourly(since + timedelta(hours=24 * 39), 1)
     async with HAClient(fake_ha.url, "good") as ha:
         await sync_once(ha, pg, cfg(), now=later)
     hour_requests = [r for r in fake_ha.requests if r.get("period") == "hour"]
-    assert all(r["start_time"] >= "2026-10-09" for r in hour_requests)
+    assert len(hour_requests) == 1
+    assert set(hour_requests[0]["statistic_ids"]) == {"sensor.t", "sensor.e", "sensor.leer"}
+    assert hour_requests[0]["start_time"] == (NOW - timedelta(hours=3)).isoformat()
     assert pg.execute("SELECT count(*) FROM stats_hour").fetchone()[0] == 24 * 39 * 2 + 1
 
     # --resync goes back to the start
@@ -282,3 +286,69 @@ def test_private_schema_is_private(pg):
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         pg.execute("SELECT * FROM meta")
     pg.rollback()
+
+
+async def test_repeated_states_are_no_change(pg, fake_ha):
+    db.setup(pg)
+    settings = cfg(state_entities=("binary_sensor.*",))
+    fake_ha.states.append(entity("binary_sensor.door", "Haustür"))
+    start = NOW - timedelta(hours=5)
+    # 60: HA restarted and stamped the unchanged state again
+    fake_ha.history["binary_sensor.door"] = changes(start, [(0, "off"), (30, "on"), (60, "on"), (90, "off")])
+    async with HAClient(fake_ha.url, "good") as ha:
+        await sync_once(ha, pg, settings, now=NOW)
+    assert pg.execute('SELECT state FROM zustaende ORDER BY "time"').fetchall() == [("off",), ("on",), ("off",)]
+
+    # The next fetch starts with the state already stored: not stored again
+    fake_ha.history["binary_sensor.door"] += changes(NOW + timedelta(minutes=20), [(0, "off"), (10, "on")])
+    async with HAClient(fake_ha.url, "good") as ha:
+        await sync_once(ha, pg, settings, now=NOW + timedelta(hours=1))
+    assert [r[0] for r in pg.execute('SELECT state FROM zustaende ORDER BY "time"').fetchall()] == [
+        "off", "on", "off", "on"]
+    phases = pg.execute("SELECT extract(epoch FROM ende - beginn) / 60 FROM zustand_phasen ORDER BY beginn").fetchall()
+    assert phases[1] == (60,)
+
+    # Rows archived before 0.7.0 are cleaned once at setup
+    pg.execute("INSERT INTO zustaende VALUES ('binary_sensor.door', %s, 'on')", (NOW + timedelta(hours=2),))
+    pg.execute("DELETE FROM sync_marken WHERE name = 'zustaende_ohne_wiederholung'")
+    pg.commit()
+    db.setup(pg)
+    assert pg.execute("SELECT count(*) FROM zustaende").fetchone()[0] == 4
+
+
+def test_view_with_other_columns_is_recreated(pg):
+    db.setup(pg, ro_password="ro")
+    # As if an older version had made the view with other columns
+    pg.execute("DROP VIEW gradtage")
+    pg.execute("CREATE VIEW gradtage AS SELECT tag, temp_mittel, 1 AS alt, 2 AS noch_aelter FROM wetter_tag")
+    pg.commit()
+    db.setup(pg, ro_password="ro")
+    columns = [r[0] for r in pg.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'gradtage' ORDER BY ordinal_position")]
+    assert columns == ["tag", "temp_mittel", "gradtagzahl", "heizgradtage"]
+    pg.execute("SET ROLE grafana_ro")
+    pg.execute("SELECT * FROM gradtage")
+    pg.rollback()
+
+
+async def test_sheet_errors_do_not_log_the_link(pg, caplog):
+    db.setup(pg)
+    link = "https://docs.google.com/spreadsheets/d/geheim/edit"
+    settings = cfg(sheets=(("eins", link),))
+
+    def broken(url):
+        raise ValueError(f"unknown url type: {url!r}")
+
+    assert await sync_sheets(pg, settings, NOW, broken) == 0
+    assert "eins" in caplog.text and "ValueError" in caplog.text
+    assert "geheim" not in caplog.text
+
+
+async def test_failed_login_closes_the_socket(fake_ha):
+    from archiv.ha import HAError
+
+    client = HAClient(fake_ha.url, "bad")
+    with pytest.raises(HAError):
+        async with client:
+            pass
+    assert client.ws.close_code is not None

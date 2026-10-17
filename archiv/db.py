@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 import psycopg
@@ -118,6 +119,13 @@ CREATE TABLE IF NOT EXISTS privat.sheet_zeilen (
     daten  jsonb NOT NULL,
     PRIMARY KEY (quelle, blatt, zeile)
 );
+-- How far each statistic has been fetched per table, so series without new rows are not asked from the start again
+CREATE TABLE IF NOT EXISTS stat_marken (
+    meta_id integer NOT NULL REFERENCES meta(id),
+    tabelle text NOT NULL,
+    bis     timestamptz NOT NULL,
+    PRIMARY KEY (meta_id, tabelle)
+);
 CREATE TABLE IF NOT EXISTS sync_marken (
     name text PRIMARY KEY,
     zeit timestamptz NOT NULL
@@ -169,11 +177,54 @@ def connect(dsn: str) -> psycopg.Connection:
     return psycopg.connect(dsn)
 
 
+def update_timescale(dsn: str) -> None:
+    """Bring the TimescaleDB extension up to the version of the running image. It has to be the first
+    statement of a session, hence its own connection; without the extension nothing happens."""
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            before = _extversion(conn)
+            if before is None:
+                return
+            conn.execute("ALTER EXTENSION timescaledb UPDATE")
+            after = _extversion(conn)
+            if after != before:
+                log.info("TimescaleDB extension updated from %s to %s", before, after)
+    except psycopg.Error as err:
+        log.warning("TimescaleDB extension not updated: %s", err.diag.message_primary or err)
+
+
+def _extversion(conn) -> str | None:
+    row = conn.execute("SELECT extversion FROM pg_extension WHERE extname = 'timescaledb'").fetchone()
+    return row[0] if row else None
+
+
+def statements(script: str) -> list[str]:
+    """The script's statements one by one (none of them contains a semicolon inside)."""
+    return [s.strip() for s in re.split(r";\s*\n", script) if re.sub(r"--[^\n]*", "", s).strip()]
+
+
+def _create_view(conn, statement: str) -> None:
+    """CREATE OR REPLACE cannot drop, rename or retype columns; then the view is dropped and made anew."""
+    try:
+        with conn.transaction():
+            conn.execute(statement)
+    except psycopg.errors.InvalidTableDefinition:
+        name = re.search(r"CREATE OR REPLACE VIEW (\S+)", statement).group(1)
+        log.info("view %s changed its columns, recreating it", name)
+        conn.execute(sql.SQL("DROP VIEW {}").format(sql.Identifier(*name.split("."))))
+        conn.execute(statement)
+
+
 def setup(conn: psycopg.Connection, ro_password: str | None = None, private_password: str | None = None) -> bool:
     """Create tables and views; returns True when TimescaleDB is in use."""
     timescale = _try(conn, "CREATE EXTENSION IF NOT EXISTS timescaledb")
-    conn.execute(SCHEMA)
+    for statement in statements(SCHEMA):
+        if "CREATE OR REPLACE VIEW" in statement:
+            _create_view(conn, statement)
+        else:
+            conn.execute(statement)
     conn.commit()
+    _drop_repeated_states(conn)
     if timescale:
         for table, (time_col, segment_col, chunk, compress_after) in TABLES.items():
             conn.execute(
@@ -414,12 +465,23 @@ def state_marks(conn: psycopg.Connection, entities: dict[str, str | None]) -> di
 
 
 def insert_states(conn: psycopg.Connection, result: dict[str, list[dict]]) -> int:
-    """Rows in HA's minimal history format: s = state, lu = last changed (epoch s); a first row may carry lc."""
-    values = [
-        (entity_id, datetime.fromtimestamp(r.get("lc", r["lu"]), timezone.utc), r.get("s"))
-        for entity_id, rows in result.items()
-        for r in rows
-    ]
+    """Rows in HA's minimal history format: s = state, lu = last changed (epoch s); a first row may carry lc.
+    A row with the same state as the one before is no change (HA stamps every state anew when it restarts)."""
+    values = []
+    for entity_id, rows in result.items():
+        stamped = sorted((datetime.fromtimestamp(r.get("lc", r["lu"]), timezone.utc), r.get("s")) for r in rows)
+        if not stamped:
+            continue
+        before = conn.execute(
+            'SELECT state FROM zustaende WHERE entity_id = %s AND "time" < %s ORDER BY "time" DESC LIMIT 1',
+            (entity_id, stamped[0][0]),
+        ).fetchone()
+        previous = before[0] if before else None
+        for when, state in stamped:
+            if before is not None and state == previous:
+                continue
+            values.append((entity_id, when, state))
+            previous, before = state, True
     if not values:
         return 0
     with conn.cursor() as cur:
@@ -429,6 +491,38 @@ def insert_states(conn: psycopg.Connection, result: dict[str, list[dict]]) -> in
             values,
         )
     return len(values)
+
+
+def _drop_repeated_states(conn) -> None:
+    """Once: remove rows archived before 0.7.0 that only repeat the state before them."""
+    if get_mark(conn, "zustaende_ohne_wiederholung"):
+        return
+    gone = conn.execute(
+        """
+        DELETE FROM zustaende z USING (
+            SELECT entity_id, "time", state IS NOT DISTINCT FROM lag(state) OVER w AS gleich
+            FROM zustaende WINDOW w AS (PARTITION BY entity_id ORDER BY "time")
+        ) d
+        WHERE d.gleich AND z.entity_id = d.entity_id AND z."time" = d."time"
+        """
+    ).rowcount
+    set_mark(conn, "zustaende_ohne_wiederholung", datetime.now(timezone.utc))
+    conn.commit()
+    if gone:
+        log.info("removed %d archived states that only repeated the one before", gone)
+
+
+def stat_marks(conn: psycopg.Connection, table: str) -> dict[int, datetime]:
+    return dict(conn.execute("SELECT meta_id, bis FROM stat_marken WHERE tabelle = %s", (table,)).fetchall())
+
+
+def set_stat_marks(conn: psycopg.Connection, table: str, meta_ids: list[int], bis: datetime) -> None:
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO stat_marken (meta_id, tabelle, bis) VALUES (%s, %s, %s)"
+            " ON CONFLICT (meta_id, tabelle) DO UPDATE SET bis = EXCLUDED.bis",
+            [(m, table, bis) for m in meta_ids],
+        )
 
 
 def set_state_marks(conn: psycopg.Connection, entity_ids: list[str], bis: datetime) -> None:
